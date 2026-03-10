@@ -1,26 +1,33 @@
 package com.aws.utils.redshift.exception;
 
 /**
- * Thrown when a Redshift query fails at the execution level.
+ * Thrown when a Redshift query exceeds the configured timeout.
  *
- * Wraps underlying AWS SDK or JDBC exceptions with a single
- * consistent exception type so consuming code only needs to
- * catch one exception regardless of which strategy is active.
+ * Extends RedshiftQueryException so callers can either:
+ *   - Catch RedshiftTimeoutException specifically to handle timeouts differently
+ *   - Catch RedshiftQueryException broadly to handle all failures the same way
  *
- * Example:
- *   try {
- *       queryExecutor.executeQuery(request);
- *   } catch (RedshiftQueryException e) {
- *       // handles both DATA_API and JDBC failures
- *   }
+ * When this is thrown, the timed-out query will have already been
+ * cancelled on the Redshift side to avoid wasting cluster resources.
  */
-public class RedshiftQueryException extends RuntimeException {
+public class RedshiftTimeoutException extends RedshiftQueryException {
 
-    public RedshiftQueryException(String message) {
+    public RedshiftTimeoutException(String message) {
         super(message);
     }
-
-    public RedshiftQueryException(String message, Throwable cause) {
-        super(message, cause);
-    }
 }
+```
+
+---
+
+### ✅ What you should see when Step 4 is done
+
+Your model and exception packages should look like this:
+```
+com/aws/utils/redshift/
+├── model/
+│   ├── QueryRequest.java
+│   └── QueryResult.java
+└── exception/
+    ├── RedshiftQueryException.java
+    └── RedshiftTimeoutException.java
