@@ -1,78 +1,80 @@
-package com.aws.utils.redshift.health;
+package com.aws.utils.redshift.util;
 
-import com.aws.utils.redshift.connection.RedshiftConnector;
-import lombok.RequiredArgsConstructor;
+import com.aws.utils.redshift.config.RedshiftProperties.CredentialsStrategy;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.HealthIndicator;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider;
 
 /**
- * Spring Boot Actuator health indicator for Redshift connectivity.
+ * Factory that creates the correct AwsCredentialsProvider
+ * based on the configured CredentialsStrategy.
  *
- * Automatically exposed at:
- *   GET /actuator/health/redshift
+ * Strategy breakdown:
  *
- * Discovered automatically by Spring Boot Actuator via the
- * HealthIndicator interface — no extra configuration needed.
+ *   IAM_ROLE (recommended)
+ *     Uses DefaultCredentialsProvider which resolves credentials
+ *     in this order automatically:
+ *       1. Environment variables
+ *       2. System properties
+ *       3. Web Identity Token (EKS)
+ *       4. EC2 / ECS instance role  ← what you want in production
+ *     Zero credential management — just assign an IAM role
+ *     to your EC2/ECS task and this works automatically.
  *
- * Sample response when healthy:
- *   {
- *     "status": "UP",
- *     "details": {
- *       "strategy": "DATA_API"
- *     }
- *   }
+ *   ENVIRONMENT
+ *     Reads AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+ *     directly from environment variables.
+ *     Useful for local development and CI/CD pipelines.
  *
- * Sample response when unhealthy:
- *   {
- *     "status": "DOWN",
- *     "details": {
- *       "strategy": "DATA_API",
- *       "error": "Connection refused"
- *     }
- *   }
+ *   SECRETS_MANAGER
+ *     Still uses DefaultCredentialsProvider to authenticate
+ *     with AWS (to call Secrets Manager itself).
+ *     The actual Redshift credentials are then fetched
+ *     separately by SecretsManagerUtil.
  *
- * Security note:
- *   Protect /actuator/health in production — either behind
- *   authentication or only accessible from internal networks.
- *   Stack traces are never exposed in the response.
+ * This is a static utility — not a Spring bean.
+ * Called internally by RedshiftAutoConfiguration only.
  */
 @Slf4j
-@RequiredArgsConstructor
-public class RedshiftHealthIndicator implements HealthIndicator {
+public final class CredentialsProviderFactory {
 
-    private final RedshiftConnector connector;
+    // Utility class — no instantiation
+    private CredentialsProviderFactory() {}
 
-    @Override
-    public Health health() {
-        try {
-            boolean healthy = connector.isHealthy();
+    /**
+     * Creates an AwsCredentialsProvider for the given strategy.
+     *
+     * @param strategy the credentials strategy from config
+     * @return the appropriate provider implementation
+     */
+    public static AwsCredentialsProvider create(
+            CredentialsStrategy strategy) {
+        return switch (strategy) {
 
-            if (healthy) {
-                return Health.up()
-                        .withDetail("strategy",
-                                connector.getStrategyName())
-                        .build();
+            case IAM_ROLE -> {
+                log.debug("[CredentialsFactory] Using " +
+                        "DefaultCredentialsProvider (IAM Role chain)");
+                // Resolves: env vars → system props →
+                // web identity → EC2/ECS instance role
+                yield DefaultCredentialsProvider.create();
             }
 
-            return Health.down()
-                    .withDetail("strategy",
-                            connector.getStrategyName())
-                    .withDetail("reason",
-                            "Health check query returned no result")
-                    .build();
+            case ENVIRONMENT -> {
+                log.debug("[CredentialsFactory] Using " +
+                        "EnvironmentVariableCredentialsProvider");
+                yield EnvironmentVariableCredentialsProvider.create();
+            }
 
-        } catch (Exception e) {
-            log.warn("[RedshiftHealth] Health check failed: {}",
-                    e.getMessage());
-
-            // Return message only — never expose stack trace
-            // in health endpoint responses
-            return Health.down()
-                    .withDetail("strategy",
-                            connector.getStrategyName())
-                    .withDetail("error", e.getMessage())
-                    .build();
-        }
+            case SECRETS_MANAGER -> {
+                log.debug("[CredentialsFactory] Using " +
+                        "DefaultCredentialsProvider " +
+                        "(for Secrets Manager access)");
+                // IAM role is still needed to call Secrets Manager.
+                // DefaultCredentialsProvider handles this via
+                // the instance role automatically.
+                yield DefaultCredentialsProvider.create();
+            }
+        };
     }
 }
