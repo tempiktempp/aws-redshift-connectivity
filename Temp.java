@@ -1,188 +1,59 @@
-package com.aws.utils.redshift.util;
+package com.aws.utils.redshift.connection;
 
-import com.aws.utils.redshift.exception.RedshiftQueryException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
-import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
-import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse;
-import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
-
-import java.util.Map;
+import com.aws.utils.redshift.model.QueryRequest;
+import com.aws.utils.redshift.model.QueryResult;
 
 /**
- * Utility for fetching and parsing secrets from AWS Secrets Manager.
+ * Strategy interface for Redshift connectivity.
  *
- * Redshift secrets are expected to be JSON with at minimum:
- *   {
- *     "username": "redshift_api_user",
- *     "password": "s3cur3-p@ssw0rd"
- *   }
+ * Defines the contract for executing queries against AWS Redshift.
+ * Two implementations are provided:
  *
- * This matches the format used by the AWS-managed Redshift
- * rotation Lambda — so secrets created via the AWS Console
- * "Credentials for Amazon Redshift" option work out of the box.
+ *   DataApiRedshiftConnector  — AWS Redshift Data API (recommended)
+ *   JdbcRedshiftConnector     — Direct JDBC via HikariCP
  *
- * Security notes:
- *   - Password is held in memory only during DataSource init
- *   - Password is NEVER logged anywhere in this class
- *   - toString() on RedshiftSecret explicitly redacts password
- *     to prevent accidental exposure in logs or exceptions
+ * Consuming code depends only on this interface via
+ * RedshiftQueryExecutor — the concrete implementation is
+ * resolved automatically by Spring based on the configured
+ * redshift.connection-strategy property.
+ *
+ * Switching strategies requires zero code changes —
+ * just one line in application.yml.
+ *
+ * Design pattern: Strategy
  */
-@Slf4j
-@RequiredArgsConstructor
-public class SecretsManagerUtil {
-
-    private final SecretsManagerClient secretsManagerClient;
-
-    private static final ObjectMapper OBJECT_MAPPER =
-            new ObjectMapper();
+public interface RedshiftConnector {
 
     /**
-     * Fetches and parses a Redshift secret from Secrets Manager.
+     * Executes a SQL query against Redshift and returns results.
      *
-     * @param secretArn the full ARN of the secret
-     * @return RedshiftSecret record with username and password
-     * @throws RedshiftQueryException if secret cannot be fetched
-     *         or does not contain required keys
+     * Implementations are responsible for:
+     *   - Binding named parameters safely
+     *   - Enforcing the configured timeout
+     *   - Paginating through large result sets
+     *   - Cleaning up all resources after execution
+     *
+     * @param request query containing SQL, parameters and options
+     * @return QueryResult containing rows and metadata
+     * @throws com.aws.utils.redshift.exception.RedshiftQueryException
+     *         on query failure
+     * @throws com.aws.utils.redshift.exception.RedshiftTimeoutException
+     *         on timeout — query will have been cancelled on Redshift side
      */
-    public RedshiftSecret fetchRedshiftSecret(String secretArn) {
-        if (secretArn == null || secretArn.isBlank()) {
-            throw new IllegalArgumentException(
-                    "secretArn must not be null or blank.");
-        }
-
-        // Log partial ARN only — never log the full ARN
-        // as it can contain account IDs
-        log.info("[SecretsManager] Fetching Redshift credentials. " +
-                        "secret=...{}",
-                secretArn.substring(
-                        Math.max(0, secretArn.length() - 8)));
-
-        try {
-            GetSecretValueRequest request =
-                    GetSecretValueRequest.builder()
-                            .secretId(secretArn)
-                            .build();
-
-            GetSecretValueResponse response =
-                    secretsManagerClient.getSecretValue(request);
-
-            String secretJson = response.secretString();
-
-            if (secretJson == null || secretJson.isBlank()) {
-                throw new RedshiftQueryException(
-                        "Secret value is empty for ARN: "
-                        + secretArn);
-            }
-
-            @SuppressWarnings("unchecked")
-            Map<String, String> secretMap =
-                    OBJECT_MAPPER.readValue(secretJson, Map.class);
-
-            String username = secretMap.get("username");
-            String password = secretMap.get("password");
-
-            if (username == null || password == null) {
-                throw new RedshiftQueryException(
-                        "Secret must contain 'username' and " +
-                        "'password' keys.");
-            }
-
-            // Log username only — never log password
-            log.info("[SecretsManager] Credentials loaded " +
-                    "for user: {}", username);
-
-            return new RedshiftSecret(username, password);
-
-        } catch (SecretsManagerException e) {
-            throw new RedshiftQueryException(
-                    "Failed to retrieve secret from " +
-                    "Secrets Manager: " + e.getMessage(), e);
-        } catch (RedshiftQueryException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RedshiftQueryException(
-                    "Failed to parse Redshift secret JSON: "
-                    + e.getMessage(), e);
-        }
-    }
+    QueryResult executeQuery(QueryRequest request);
 
     /**
-     * Immutable record holding Redshift credentials.
+     * Lightweight connectivity check used by the health indicator.
+     * Implementations run a minimal query e.g. SELECT 1.
      *
-     * toString() deliberately redacts the password to prevent
-     * accidental exposure if this object is ever logged.
-     *
-     * @param username Redshift database username
-     * @param password Redshift database password
+     * @return true if connection to Redshift is healthy
      */
-    public record RedshiftSecret(String username, String password) {
+    boolean isHealthy();
 
-        @Override
-        public String toString() {
-            return "RedshiftSecret{" +
-                    "username='" + username + "'" +
-                    ", password='[REDACTED]'" +
-                    "}";
-        }
-    }
+    /**
+     * Returns the strategy name for logging and monitoring.
+     *
+     * @return "DATA_API" or "JDBC"
+     */
+    String getStrategyName();
 }
-```
-
----
-
-### 8.4 — Verify `AutoConfiguration.imports` file
-
-Open `src/main/resources/META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` and confirm it contains exactly this one line:
-```
-com.aws.utils.redshift.config.RedshiftAutoConfiguration
-```
-
-No extra spaces, no blank lines before or after.
-
----
-
-### ✅ What you should see when Step 8 is done
-
-Complete `aws-redshift-utils` structure:
-```
-com/aws/utils/redshift/
-├── config/
-│   ├── RedshiftProperties.java
-│   └── RedshiftAutoConfiguration.java
-├── connection/
-│   ├── RedshiftConnector.java
-│   ├── DataApiRedshiftConnector.java
-│   └── JdbcRedshiftConnector.java
-├── executor/
-│   └── RedshiftQueryExecutor.java
-├── model/
-│   ├── QueryRequest.java
-│   └── QueryResult.java
-├── exception/
-│   ├── RedshiftQueryException.java
-│   └── RedshiftTimeoutException.java
-├── health/
-│   └── RedshiftHealthIndicator.java
-└── util/
-    ├── CredentialsProviderFactory.java
-    └── SecretsManagerUtil.java
-```
-
-**Zero compile errors** across all files in `aws-redshift-utils`.
-
----
-
-### 8.5 — Build the module
-
-Run this in the terminal at the `aws-redshift-utils` level to confirm everything compiles and installs to your local `.m2`:
-```
-mvn clean install -DskipTests
-```
-
-You should see:
-```
-BUILD SUCCESS
-Installing aws-redshift-utils-1.0.0.jar to ~/.m2/...
