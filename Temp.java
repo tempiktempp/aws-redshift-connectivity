@@ -1,185 +1,222 @@
-package com.aws.utils.redshift.connection;
+package com.aws.utils.redshift.executor;
 
 import com.aws.utils.redshift.config.RedshiftProperties;
+import com.aws.utils.redshift.connection.RedshiftConnector;
 import com.aws.utils.redshift.exception.RedshiftQueryException;
 import com.aws.utils.redshift.model.QueryRequest;
 import com.aws.utils.redshift.model.QueryResult;
-import com.aws.utils.redshift.model.QueryResult.ColumnMetadata;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.slf4j.MDC;
 
-import javax.sql.DataSource;
-import java.sql.ResultSetMetaData;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
- * Redshift connector backed by direct JDBC via HikariCP.
+ * The primary public API of aws-redshift-utils.
  *
- * Use this when:
- *   - Sub-100ms latency is required (no async polling overhead)
- *   - Your app runs in the same VPC as the Redshift cluster
- *   - Synchronous request-response patterns are needed
+ * This is the ONLY class consuming projects need to inject.
+ * It wraps the connector strategy and adds cross-cutting
+ * concerns transparently:
  *
- * Security properties:
- *   - All queries use NamedParameterJdbcTemplate with named
- *     parameters — prevents SQL injection at the value level
- *   - SSL enforced by default via the JDBC URL
- *   - Credentials injected at startup from Secrets Manager
- *     or IAM — never stored in this class
+ *   - Input validation
+ *     Rejects null requests and blank SQL immediately
+ *     before anything hits the network.
  *
- * Trade-off:
- *   Requires port 5439 reachable from the app network.
- *   Use DataApiRedshiftConnector if direct cluster access
- *   is not available or not desired.
+ *   - Execution timing
+ *     Logs query duration in milliseconds for every execution.
+ *     Useful for identifying slow queries in production.
+ *
+ *   - Correlation ID
+ *     Injects a unique redshiftQueryId into MDC on every
+ *     execution so all log lines for one query are traceable
+ *     across the connector and polling layers.
+ *
+ *   - Strategy transparency
+ *     Callers never know whether DATA_API or JDBC is active.
+ *     Switching strategies requires zero changes in consuming code.
+ *
+ *
+ * Usage in a consuming service:
+ *
+ *   @Service
+ *   @RequiredArgsConstructor
+ *   public class OrderService {
+ *
+ *       private final RedshiftQueryExecutor queryExecutor;
+ *
+ *       public List<Map<String, Object>> getOpenOrders(String status) {
+ *           QueryRequest request = QueryRequest.builder()
+ *               .sql("SELECT order_id, amount " +
+ *                    "FROM fact_orders " +
+ *                    "WHERE status = :status")
+ *               .parameter("status", status)
+ *               .queryLabel("open-orders")
+ *               .maxResults(100)
+ *               .build();
+ *
+ *           return queryExecutor.queryForList(request);
+ *       }
+ *   }
  */
 @Slf4j
-public class JdbcRedshiftConnector implements RedshiftConnector {
+@RequiredArgsConstructor
+public class RedshiftQueryExecutor {
 
-    private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final RedshiftConnector connector;
     private final RedshiftProperties props;
 
-    private static final String STRATEGY_NAME = "JDBC";
+    private static final String MDC_QUERY_ID    = "redshiftQueryId";
+    private static final String MDC_QUERY_LABEL = "redshiftQueryLabel";
 
-    public JdbcRedshiftConnector(DataSource dataSource,
-                                  RedshiftProperties props) {
-        this.jdbcTemplate =
-                new NamedParameterJdbcTemplate(dataSource);
-        this.props = props;
-    }
+    // ── Core execution ─────────────────────────────────────────────
 
-    // ── RedshiftConnector implementation ──────────────────────────
-
-    @Override
+    /**
+     * Executes a SQL query and returns the full result set.
+     *
+     * @param request the query — SQL, parameters and options
+     * @return QueryResult containing rows, metadata and execution info
+     * @throws IllegalArgumentException if request or SQL is null/blank
+     * @throws RedshiftQueryException   if the query fails at Redshift level
+     */
     public QueryResult executeQuery(QueryRequest request) {
-        log.debug("[Redshift-JDBC] Executing query, " +
-                "database: {}", props.getDatabase());
+        validateRequest(request);
 
-        MapSqlParameterSource paramSource =
-                buildParamSource(request);
+        String executionId = UUID.randomUUID().toString();
+        String label = request.getQueryLabel() != null
+                ? request.getQueryLabel()
+                : "unnamed";
 
-        List<Map<String, Object>> rows = new ArrayList<>();
-        List<ColumnMetadata> columnMetadata = new ArrayList<>();
-        int[] rowCount = {0};
-        int maxResults = effectiveMaxResults(request);
+        MDC.put(MDC_QUERY_ID, executionId);
+        MDC.put(MDC_QUERY_LABEL, label);
+
+        Instant start = Instant.now();
 
         try {
-            jdbcTemplate.query(
-                    request.getSql(),
-                    paramSource,
-                    rs -> {
-                        // Extract column metadata on first row only
-                        if (columnMetadata.isEmpty()) {
-                            ResultSetMetaData meta =
-                                    rs.getMetaData();
-                            int colCount = meta.getColumnCount();
-                            for (int i = 1; i <= colCount; i++) {
-                                columnMetadata.add(
-                                        new ColumnMetadata(
-                                                meta.getColumnLabel(i),
-                                                meta.getColumnTypeName(i)
-                                        ));
-                            }
-                        }
+            log.info("[RedshiftExecutor] Starting query. " +
+                            "label={}, strategy={}",
+                    label,
+                    connector.getStrategyName());
 
-                        // Hard cap on results
-                        if (rowCount[0] >= maxResults) {
-                            return;
-                        }
+            QueryResult result = connector.executeQuery(request);
 
-                        Map<String, Object> row =
-                                new LinkedHashMap<>();
-                        for (ColumnMetadata col : columnMetadata) {
-                            row.put(col.name(),
-                                    rs.getObject(col.name()));
-                        }
-                        rows.add(row);
-                        rowCount[0]++;
-                    });
+            long durationMs = Duration
+                    .between(start, Instant.now())
+                    .toMillis();
 
-            log.debug("[Redshift-JDBC] Query complete, " +
-                    "rows: {}", rows.size());
+            log.info("[RedshiftExecutor] Query completed. " +
+                            "label={}, rows={}, duration_ms={}",
+                    label,
+                    result.getTotalRows(),
+                    durationMs);
 
-            return QueryResult.builder()
-                    .rows(Collections.unmodifiableList(rows))
-                    .columnMetadata(Collections.unmodifiableList(
-                            columnMetadata))
-                    .totalRows(rows.size())
-                    .queryId(null) // no async ID for JDBC
-                    .strategy(STRATEGY_NAME)
-                    .build();
+            return result;
 
-        } catch (org.springframework.dao.DataAccessException e) {
-            throw new RedshiftQueryException(
-                    "JDBC query execution failed: "
-                    + e.getMessage(), e);
-        }
-    }
+        } catch (RedshiftQueryException e) {
+            long durationMs = Duration
+                    .between(start, Instant.now())
+                    .toMillis();
 
-    @Override
-    public boolean isHealthy() {
-        try {
-            jdbcTemplate.queryForObject(
-                    "SELECT 1",
-                    new MapSqlParameterSource(),
-                    Integer.class);
-            return true;
-        } catch (Exception e) {
-            log.warn("[Redshift-JDBC] Health check failed: {}",
+            log.error("[RedshiftExecutor] Query failed. " +
+                            "label={}, duration_ms={}, error={}",
+                    label,
+                    durationMs,
                     e.getMessage());
-            return false;
+
+            // Re-throw as-is — don't wrap again,
+            // preserves the original exception type
+            // (RedshiftTimeoutException stays as timeout)
+            throw e;
+
+        } finally {
+            // Always clean up MDC — thread-local leak otherwise
+            MDC.remove(MDC_QUERY_ID);
+            MDC.remove(MDC_QUERY_LABEL);
         }
     }
 
-    @Override
-    public String getStrategyName() {
-        return STRATEGY_NAME;
+    // ── Convenience methods ────────────────────────────────────────
+
+    /**
+     * Executes a query and returns only the rows list.
+     * Use when you don't need metadata or the queryId.
+     *
+     * Example:
+     *   List<Map<String, Object>> rows = queryExecutor.queryForList(
+     *       QueryRequest.builder()
+     *           .sql("SELECT * FROM fact_orders WHERE status = :status")
+     *           .parameter("status", "OPEN")
+     *           .build()
+     *   );
+     */
+    public List<Map<String, Object>> queryForList(
+            QueryRequest request) {
+        return executeQuery(request).getRows();
+    }
+
+    /**
+     * Executes a query and returns the first row only.
+     * Returns an empty map if no rows are found.
+     *
+     * Useful for ID-based lookups expected to return 0 or 1 row.
+     *
+     * Example:
+     *   Map<String, Object> order = queryExecutor.queryForSingleRow(
+     *       QueryRequest.builder()
+     *           .sql("SELECT * FROM fact_orders " +
+     *                "WHERE order_id = :orderId")
+     *           .parameter("orderId", "ORD-001")
+     *           .maxResults(1)
+     *           .build()
+     *   );
+     *
+     *   String status = (String) order.get("status");
+     */
+    public Map<String, Object> queryForSingleRow(
+            QueryRequest request) {
+        return executeQuery(request).firstRow();
+    }
+
+    /**
+     * Returns the name of the active connector strategy.
+     * Useful for diagnostic endpoints or admin dashboards.
+     *
+     * @return "DATA_API" or "JDBC"
+     */
+    public String getActiveStrategy() {
+        return connector.getStrategyName();
     }
 
     // ── Private helpers ────────────────────────────────────────────
 
-    /**
-     * Builds a named parameter source from the request parameters.
-     * All values pass through Spring's binding layer —
-     * prevents injection at the value level.
-     */
-    private MapSqlParameterSource buildParamSource(
-            QueryRequest request) {
-        MapSqlParameterSource source =
-                new MapSqlParameterSource();
-        if (request.getParameters() != null) {
-            request.getParameters().forEach(source::addValue);
+    private void validateRequest(QueryRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException(
+                    "QueryRequest must not be null.");
         }
-        return source;
-    }
-
-    private int effectiveMaxResults(QueryRequest request) {
-        int configMax = props.getQuery().getMaxResultsPerPage();
-        return request.getMaxResults() > 0
-                ? Math.min(request.getMaxResults(), configMax)
-                : configMax;
+        if (request.getSql() == null
+                || request.getSql().isBlank()) {
+            throw new IllegalArgumentException(
+                    "QueryRequest.sql must not be null or blank.");
+        }
     }
 }
 ```
 
 ---
 
-### ✅ What you should see when Step 6 is done
+### ✅ What you should see when Step 7 is done
 ```
 com/aws/utils/redshift/
-└── connection/
-    ├── RedshiftConnector.java
-    ├── DataApiRedshiftConnector.java
-    └── JdbcRedshiftConnector.java
+└── executor/
+    └── RedshiftQueryExecutor.java
 ```
 
-Red errors in `RedshiftAutoConfiguration` should now be reduced to only these remaining missing classes:
+Red errors in `RedshiftAutoConfiguration` should now be down to only these two remaining:
 ```
-RedshiftQueryExecutor       ← Step 7
 RedshiftHealthIndicator     ← Step 8
 CredentialsProviderFactory  ← Step 8
 SecretsManagerUtil          ← Step 8
