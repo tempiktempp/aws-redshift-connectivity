@@ -1,128 +1,238 @@
-package com.edp.api.controller;
+package com.edp.api.exception;
 
-import com.aws.utils.redshift.model.QueryResult;
-import com.edp.api.service.RedshiftDataService;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.Pattern;
-import lombok.RequiredArgsConstructor;
+import com.aws.utils.redshift.exception.RedshiftQueryException;
+import com.aws.utils.redshift.exception.RedshiftTimeoutException;
+import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.validation.annotation.Validated;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-import java.util.List;
+import java.time.Instant;
 import java.util.Map;
+import java.util.UUID;
 
 /**
- * REST controller exposing Redshift data fetch APIs.
+ * Global exception handler for edp-api-service.
  *
- * All endpoints are versioned under /api/v1/redshift.
- * Versioning from day one makes non-breaking evolution easier.
+ * Catches all exceptions thrown from controllers and services
+ * and maps them to consistent RFC 7807-style error responses.
  *
- * Input validation is applied at the controller layer:
- *   - @Pattern on tableName prevents path traversal
- *   - @Min / @Max on maxResults prevents abuse
- *   - Business-level whitelist validation happens in the service
+ * Error response shape:
+ *   {
+ *     "traceId":   "uuid",         <- correlate with logs
+ *     "status":    400,
+ *     "error":     "BAD_REQUEST",
+ *     "message":   "human readable message",
+ *     "timestamp": "2024-01-01T00:00:00Z"
+ *   }
+ *
+ * Security rules:
+ *   - Stack traces are NEVER exposed in responses
+ *   - Internal error messages are sanitised before returning
+ *   - traceId lets engineers look up the full trace in logs
  */
 @Slf4j
-@Validated
-@RestController
-@RequiredArgsConstructor
-@RequestMapping("/api/v1/redshift")
-public class RedshiftDataController {
-
-    private final RedshiftDataService redshiftDataService;
+@RestControllerAdvice
+public class GlobalExceptionHandler {
 
     /**
-     * Fetch all rows from a table with an optional status filter.
-     *
-     * GET /api/v1/redshift/tables/{tableName}
-     * GET /api/v1/redshift/tables/{tableName}?status=OPEN
-     * GET /api/v1/redshift/tables/{tableName}?status=OPEN&maxResults=50
-     *
-     * @param tableName  name of the table — only lowercase letters
-     *                   and underscores allowed
-     * @param status     optional filter on status column
-     * @param maxResults max rows to return, default 100, max 1000
+     * Handles Redshift query timeout.
+     * Returns 504 Gateway Timeout.
      */
-    @GetMapping("/tables/{tableName}")
-    public ResponseEntity<List<Map<String, Object>>> fetchTableData(
-            @PathVariable
-            @Pattern(
-                regexp = "^[a-z_]{1,64}$",
-                message = "tableName must be lowercase letters " +
-                          "and underscores only")
-            String tableName,
-
-            @RequestParam(required = false)
-            String status,
-
-            @RequestParam(defaultValue = "100")
-            @Min(value = 1, message = "maxResults must be at least 1")
-            @Max(value = 1000, message = "maxResults cannot exceed 1000")
-            int maxResults) {
-
-        log.info("[Controller] Fetch table data. " +
-                        "table={}, status={}, maxResults={}",
-                tableName, status, maxResults);
-
-        List<Map<String, Object>> rows =
-                redshiftDataService.fetchTableData(
-                        tableName, status, maxResults);
-
-        return ResponseEntity.ok(rows);
+    @ExceptionHandler(RedshiftTimeoutException.class)
+    public ResponseEntity<Map<String, Object>> handleTimeout(
+            RedshiftTimeoutException ex) {
+        String traceId = UUID.randomUUID().toString();
+        log.error("[ExceptionHandler] Redshift timeout. " +
+                "traceId={}, error={}", traceId, ex.getMessage());
+        return ResponseEntity
+                .status(HttpStatus.GATEWAY_TIMEOUT)
+                .body(errorBody(
+                        traceId,
+                        504,
+                        "GATEWAY_TIMEOUT",
+                        "Query timed out. Please try again " +
+                        "or reduce the scope of your request."));
     }
 
     /**
-     * Fetch a single row by ID from a table.
-     *
-     * GET /api/v1/redshift/tables/{tableName}/{id}
-     *
-     * @param tableName name of the table
-     * @param id        the row ID to look up
+     * Handles Redshift query failures.
+     * Returns 502 Bad Gateway.
      */
-    @GetMapping("/tables/{tableName}/{id}")
-    public ResponseEntity<Map<String, Object>> fetchById(
-            @PathVariable
-            @Pattern(
-                regexp = "^[a-z_]{1,64}$",
-                message = "tableName must be lowercase letters " +
-                          "and underscores only")
-            String tableName,
-
-            @PathVariable String id) {
-
-        log.info("[Controller] Fetch by ID. table={}, id={}",
-                tableName, id);
-
-        Map<String, Object> row =
-                redshiftDataService.fetchById(tableName, id);
-
-        if (row.isEmpty()) {
-            return ResponseEntity.notFound().build();
-        }
-
-        return ResponseEntity.ok(row);
+    @ExceptionHandler(RedshiftQueryException.class)
+    public ResponseEntity<Map<String, Object>> handleQueryException(
+            RedshiftQueryException ex) {
+        String traceId = UUID.randomUUID().toString();
+        log.error("[ExceptionHandler] Redshift query failed. " +
+                "traceId={}, error={}", traceId, ex.getMessage());
+        return ResponseEntity
+                .status(HttpStatus.BAD_GATEWAY)
+                .body(errorBody(
+                        traceId,
+                        502,
+                        "BAD_GATEWAY",
+                        "Failed to fetch data from Redshift. " +
+                        "Please try again later."));
     }
 
     /**
-     * Returns the active connector strategy.
-     * Useful for verifying which strategy is running in each environment.
-     *
-     * GET /api/v1/redshift/strategy
+     * Handles invalid arguments — bad table name, column name etc.
+     * Returns 400 Bad Request.
      */
-    @GetMapping("/strategy")
-    public ResponseEntity<Map<String, String>> getStrategy(
-            RedshiftDataService service) {
-        return ResponseEntity.ok(
-                Map.of("strategy",
-                        service.executeCustomQuery(
-                                "SELECT 1", null, 1)
-                               .getStrategy()));
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, Object>> handleIllegalArgument(
+            IllegalArgumentException ex) {
+        String traceId = UUID.randomUUID().toString();
+        log.warn("[ExceptionHandler] Invalid argument. " +
+                "traceId={}, error={}", traceId, ex.getMessage());
+        return ResponseEntity
+                .status(HttpStatus.BAD_REQUEST)
+                .body(errorBody(
+                        traceId,
+                        400,
+                        "BAD_REQUEST",
+                        ex.getMessage()));
     }
+
+    /**
+     * Handles @Validated constraint violations on controller params.
+     * Returns 400 Bad Request.
+     */
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<Map<String, Object>> handleConstraintViolation(
+            ConstraintViolationException ex) {
+        String traceId = UUID.randomUUID().toString();
+        log.warn("[ExceptionHandler] Constraint violation. " +
+                "traceId={}, error={}", traceId, ex.getMessage());
+        return ResponseEntity
+                .status(HttpStatus.BAD_REQUEST)
+                .body(errorBody(
+                        traceId,
+                        400,
+                        "BAD_REQUEST",
+                        ex.getMessage()));
     }
+
+    /**
+     * Catch-all for any unexpected exception.
+     * Returns 500 Internal Server Error.
+     * Never exposes internal error details to the caller.
+     */
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<Map<String, Object>> handleGeneric(
+            Exception ex) {
+        String traceId = UUID.randomUUID().toString();
+        log.error("[ExceptionHandler] Unexpected error. " +
+                "traceId={}", traceId, ex);
+        return ResponseEntity
+                .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(errorBody(
+                        traceId,
+                        500,
+                        "INTERNAL_SERVER_ERROR",
+                        "An unexpected error occurred. " +
+                        "Please contact support with traceId: "
+                        + traceId));
+    }
+
+    // ── Private helper ─────────────────────────────────────────────
+
+    private Map<String, Object> errorBody(String traceId,
+                                           int status,
+                                           String error,
+                                           String message) {
+        return Map.of(
+                "traceId",   traceId,
+                "status",    status,
+                "error",     error,
+                "message",   message,
+                "timestamp", Instant.now().toString()
+        );
+    }
+}
+```
+
+---
+
+### ✅ Final project structure
+```
+edp-parent/
+├── pom.xml
+├── aws-redshift-utils/
+│   ├── pom.xml
+│   └── src/main/java/com/aws/utils/redshift/
+│       ├── config/
+│       │   ├── RedshiftProperties.java
+│       │   └── RedshiftAutoConfiguration.java
+│       ├── connection/
+│       │   ├── RedshiftConnector.java
+│       │   ├── DataApiRedshiftConnector.java
+│       │   └── JdbcRedshiftConnector.java
+│       ├── executor/
+│       │   └── RedshiftQueryExecutor.java
+│       ├── model/
+│       │   ├── QueryRequest.java
+│       │   └── QueryResult.java
+│       ├── exception/
+│       │   ├── RedshiftQueryException.java
+│       │   └── RedshiftTimeoutException.java
+│       ├── health/
+│       │   └── RedshiftHealthIndicator.java
+│       └── util/
+│           ├── CredentialsProviderFactory.java
+│           └── SecretsManagerUtil.java
+└── edp-api-service/
+    ├── pom.xml
+    └── src/main/
+        ├── java/com/edp/api/
+        │   ├── controller/
+        │   │   └── RedshiftDataController.java
+        │   ├── service/
+        │   │   └── RedshiftDataService.java
+        │   └── exception/
+        │       └── GlobalExceptionHandler.java
+        └── resources/
+            └── application.yml
+```
+
+---
+
+### 9.5 — Final build check
+
+Run this at the **root `edp-parent` level**:
+```
+mvn clean install -DskipTests
+```
+
+You should see:
+```
+[INFO] edp-parent .......................... SUCCESS
+[INFO] aws-redshift-utils .................. SUCCESS
+[INFO] edp-api-service ..................... SUCCESS
+[INFO] BUILD SUCCESS
+```
+
+---
+
+### 9.6 — Test the API locally
+
+Set these environment variables in IntelliJ:
+```
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your-key
+AWS_SECRET_ACCESS_KEY=your-secret
+REDSHIFT_DATABASE=your-db
+REDSHIFT_CLUSTER_ID=your-cluster-id
+REDSHIFT_DB_USER=your-db-user
+```
+
+Go to **Run** → **Edit Configurations** → your Spring Boot run config → **Environment Variables** and add them there.
+
+Then run the main class and hit:
+```
+GET http://localhost:8080/api/v1/redshift/tables/orders
+GET http://localhost:8080/api/v1/redshift/tables/orders?status=OPEN
+GET http://localhost:8080/api/v1/redshift/tables/orders/123
+GET http://localhost:8080/actuator/health/redshift
