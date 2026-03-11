@@ -1,183 +1,128 @@
-package com.edp.api.service;
+package com.edp.api.controller;
 
-import com.aws.utils.redshift.executor.RedshiftQueryExecutor;
-import com.aws.utils.redshift.model.QueryRequest;
 import com.aws.utils.redshift.model.QueryResult;
+import com.edp.api.service.RedshiftDataService;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
- * Service layer for fetching data from AWS Redshift.
+ * REST controller exposing Redshift data fetch APIs.
  *
- * This class is the only place in edp-api-service that
- * interacts with RedshiftQueryExecutor directly.
+ * All endpoints are versioned under /api/v1/redshift.
+ * Versioning from day one makes non-breaking evolution easier.
  *
- * Responsibilities:
- *   - Validate and whitelist column/table identifiers
- *     before they are placed in SQL strings
- *   - Build QueryRequest objects with named parameters
- *   - Delegate execution to RedshiftQueryExecutor
- *
- * SQL Safety rules enforced here:
- *   - Filter VALUES always passed as named parameters
- *     e.g. WHERE status = :status
- *   - Column and table identifiers validated against
- *     a whitelist before being placed in SQL
- *   - Raw user input NEVER interpolated into SQL strings
+ * Input validation is applied at the controller layer:
+ *   - @Pattern on tableName prevents path traversal
+ *   - @Min / @Max on maxResults prevents abuse
+ *   - Business-level whitelist validation happens in the service
  */
 @Slf4j
-@Service
+@Validated
+@RestController
 @RequiredArgsConstructor
-public class RedshiftDataService {
+@RequestMapping("/api/v1/redshift")
+public class RedshiftDataController {
 
-    private final RedshiftQueryExecutor queryExecutor;
-
-    // ── Whitelists ─────────────────────────────────────────────────
-    // Column and table identifiers must come from these sets only.
-    // Never allow user input to define SQL identifiers directly.
-
-    private static final Set<String> ALLOWED_TABLES = Set.of(
-            "users",
-            "orders",
-            "products"
-            // add more tables here as needed
-    );
-
-    private static final Set<String> ALLOWED_COLUMNS = Set.of(
-            "id",
-            "name",
-            "status",
-            "amount",
-            "created_at",
-            "updated_at"
-            // add more columns here as needed
-    );
-
-    // ── Public API ─────────────────────────────────────────────────
+    private final RedshiftDataService redshiftDataService;
 
     /**
-     * Fetches all rows from a table with an optional status filter.
+     * Fetch all rows from a table with an optional status filter.
      *
-     * Table name is whitelisted — cannot be injected by a caller.
-     * Status value is a named parameter — cannot be injected either.
+     * GET /api/v1/redshift/tables/{tableName}
+     * GET /api/v1/redshift/tables/{tableName}?status=OPEN
+     * GET /api/v1/redshift/tables/{tableName}?status=OPEN&maxResults=50
      *
-     * @param tableName name of the Redshift table to query
-     * @param status    optional status filter — null means no filter
-     * @param maxResults max rows to return
-     * @return list of rows as column-name to value maps
+     * @param tableName  name of the table — only lowercase letters
+     *                   and underscores allowed
+     * @param status     optional filter on status column
+     * @param maxResults max rows to return, default 100, max 1000
      */
-    public List<Map<String, Object>> fetchTableData(
+    @GetMapping("/tables/{tableName}")
+    public ResponseEntity<List<Map<String, Object>>> fetchTableData(
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "tableName must be lowercase letters " +
+                          "and underscores only")
             String tableName,
+
+            @RequestParam(required = false)
             String status,
+
+            @RequestParam(defaultValue = "100")
+            @Min(value = 1, message = "maxResults must be at least 1")
+            @Max(value = 1000, message = "maxResults cannot exceed 1000")
             int maxResults) {
 
-        // Validate table identifier against whitelist
-        validateTableName(tableName);
+        log.info("[Controller] Fetch table data. " +
+                        "table={}, status={}, maxResults={}",
+                tableName, status, maxResults);
 
-        // Build SQL — identifier comes from whitelist (safe)
-        // value comes from named parameter (safe)
-        String sql = status != null
-                ? "SELECT * FROM " + tableName +
-                  " WHERE status = :status"
-                : "SELECT * FROM " + tableName;
+        List<Map<String, Object>> rows =
+                redshiftDataService.fetchTableData(
+                        tableName, status, maxResults);
 
-        QueryRequest.QueryRequestBuilder builder =
-                QueryRequest.builder()
-                        .sql(sql)
-                        .maxResults(maxResults)
-                        .queryLabel("fetch-" + tableName);
-
-        if (status != null) {
-            builder.parameter("status", status);
-        }
-
-        return queryExecutor.queryForList(builder.build());
+        return ResponseEntity.ok(rows);
     }
 
     /**
-     * Fetches a single row by ID from a given table.
+     * Fetch a single row by ID from a table.
      *
-     * @param tableName name of the Redshift table
+     * GET /api/v1/redshift/tables/{tableName}/{id}
+     *
+     * @param tableName name of the table
      * @param id        the row ID to look up
-     * @return single row as a column-name to value map,
-     *         or empty map if not found
      */
-    public Map<String, Object> fetchById(
+    @GetMapping("/tables/{tableName}/{id}")
+    public ResponseEntity<Map<String, Object>> fetchById(
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "tableName must be lowercase letters " +
+                          "and underscores only")
             String tableName,
-            Object id) {
 
-        validateTableName(tableName);
+            @PathVariable String id) {
 
-        QueryRequest request = QueryRequest.builder()
-                .sql("SELECT * FROM " + tableName +
-                     " WHERE id = :id")
-                .parameter("id", id)
-                .maxResults(1)
-                .queryLabel("fetch-by-id-" + tableName)
-                .build();
+        log.info("[Controller] Fetch by ID. table={}, id={}",
+                tableName, id);
 
-        return queryExecutor.queryForSingleRow(request);
+        Map<String, Object> row =
+                redshiftDataService.fetchById(tableName, id);
+
+        if (row.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        return ResponseEntity.ok(row);
     }
 
     /**
-     * Executes a custom query with caller-supplied parameters.
+     * Returns the active connector strategy.
+     * Useful for verifying which strategy is running in each environment.
      *
-     * The SQL must only reference whitelisted columns.
-     * This method validates all parameter keys against the
-     * column whitelist before executing.
-     *
-     * @param sql        parameterized SQL with named placeholders
-     * @param parameters named parameter map
-     * @param maxResults max rows to return
-     * @return full QueryResult including metadata
+     * GET /api/v1/redshift/strategy
      */
-    public QueryResult executeCustomQuery(
-            String sql,
-            Map<String, Object> parameters,
-            int maxResults) {
-
-        // Validate all parameter keys against column whitelist
-        if (parameters != null) {
-            parameters.keySet().forEach(this::validateColumnName);
-        }
-
-        QueryRequest.QueryRequestBuilder builder =
-                QueryRequest.builder()
-                        .sql(sql)
-                        .maxResults(maxResults)
-                        .queryLabel("custom-query");
-
-        if (parameters != null) {
-            parameters.forEach(builder::parameter);
-        }
-
-        return queryExecutor.executeQuery(builder.build());
+    @GetMapping("/strategy")
+    public ResponseEntity<Map<String, String>> getStrategy(
+            RedshiftDataService service) {
+        return ResponseEntity.ok(
+                Map.of("strategy",
+                        service.executeCustomQuery(
+                                "SELECT 1", null, 1)
+                               .getStrategy()));
     }
-
-    // ── Private validation ─────────────────────────────────────────
-
-    private void validateTableName(String tableName) {
-        if (tableName == null || tableName.isBlank()) {
-            throw new IllegalArgumentException(
-                    "Table name must not be null or blank.");
-        }
-        if (!ALLOWED_TABLES.contains(tableName.toLowerCase())) {
-            throw new IllegalArgumentException(
-                    "Table not allowed: " + tableName +
-                    ". Allowed tables: " + ALLOWED_TABLES);
-        }
     }
-
-    private void validateColumnName(String columnName) {
-        if (!ALLOWED_COLUMNS.contains(columnName.toLowerCase())) {
-            throw new IllegalArgumentException(
-                    "Column not allowed: " + columnName +
-                    ". Allowed columns: " + ALLOWED_COLUMNS);
-        }
-    }
-}
