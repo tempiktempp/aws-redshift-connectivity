@@ -1,238 +1,67 @@
-package com.edp.api.exception;
+# ─────────────────────────────────────────────────────────────────
+# local-env.sh — Local development environment variables
+#
+# Usage:
+#   First time or full setup:  source local-env.sh
+#   Rotate expired credentials: source local-env.sh rotate
+#
+# IMPORTANT:
+#   Add local-env.sh to .gitignore immediately.
+#   Never commit this file — it contains real credentials.
+# ─────────────────────────────────────────────────────────────────
 
-import com.aws.utils.redshift.exception.RedshiftQueryException;
-import com.aws.utils.redshift.exception.RedshiftTimeoutException;
-import jakarta.validation.ConstraintViolationException;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.bind.annotation.RestControllerAdvice;
+# ── Redshift Config (stable — rarely changes) ─────────────────────
+export AWS_REGION=us-east-1
+export REDSHIFT_DATABASE=your-database-name
+export REDSHIFT_CLUSTER_ID=your-cluster-identifier
+export REDSHIFT_DB_USER=your-db-user
 
-import java.time.Instant;
-import java.util.Map;
-import java.util.UUID;
+# ── AWS Credentials ───────────────────────────────────────────────
+# These expire every hour if using temporary session tokens.
+# Run: source local-env.sh rotate
+# to update just these three without re-setting everything above.
 
-/**
- * Global exception handler for edp-api-service.
- *
- * Catches all exceptions thrown from controllers and services
- * and maps them to consistent RFC 7807-style error responses.
- *
- * Error response shape:
- *   {
- *     "traceId":   "uuid",         <- correlate with logs
- *     "status":    400,
- *     "error":     "BAD_REQUEST",
- *     "message":   "human readable message",
- *     "timestamp": "2024-01-01T00:00:00Z"
- *   }
- *
- * Security rules:
- *   - Stack traces are NEVER exposed in responses
- *   - Internal error messages are sanitised before returning
- *   - traceId lets engineers look up the full trace in logs
- */
-@Slf4j
-@RestControllerAdvice
-public class GlobalExceptionHandler {
+if [ "$1" = "rotate" ]; then
+    echo "[env] Rotating AWS credentials only..."
 
-    /**
-     * Handles Redshift query timeout.
-     * Returns 504 Gateway Timeout.
-     */
-    @ExceptionHandler(RedshiftTimeoutException.class)
-    public ResponseEntity<Map<String, Object>> handleTimeout(
-            RedshiftTimeoutException ex) {
-        String traceId = UUID.randomUUID().toString();
-        log.error("[ExceptionHandler] Redshift timeout. " +
-                "traceId={}, error={}", traceId, ex.getMessage());
-        return ResponseEntity
-                .status(HttpStatus.GATEWAY_TIMEOUT)
-                .body(errorBody(
-                        traceId,
-                        504,
-                        "GATEWAY_TIMEOUT",
-                        "Query timed out. Please try again " +
-                        "or reduce the scope of your request."));
-    }
+    export AWS_ACCESS_KEY_ID=your-new-access-key
+    export AWS_SECRET_ACCESS_KEY=your-new-secret-key
+    export AWS_SESSION_TOKEN=your-new-session-token
 
-    /**
-     * Handles Redshift query failures.
-     * Returns 502 Bad Gateway.
-     */
-    @ExceptionHandler(RedshiftQueryException.class)
-    public ResponseEntity<Map<String, Object>> handleQueryException(
-            RedshiftQueryException ex) {
-        String traceId = UUID.randomUUID().toString();
-        log.error("[ExceptionHandler] Redshift query failed. " +
-                "traceId={}, error={}", traceId, ex.getMessage());
-        return ResponseEntity
-                .status(HttpStatus.BAD_GATEWAY)
-                .body(errorBody(
-                        traceId,
-                        502,
-                        "BAD_GATEWAY",
-                        "Failed to fetch data from Redshift. " +
-                        "Please try again later."));
-    }
+    echo "[env] Credentials rotated."
+    echo "[env] AWS_ACCESS_KEY_ID  = $AWS_ACCESS_KEY_ID"
+    echo "[env] Session token set  = ${AWS_SESSION_TOKEN:0:20}..."
+else
+    echo "[env] Loading all environment variables..."
 
-    /**
-     * Handles invalid arguments — bad table name, column name etc.
-     * Returns 400 Bad Request.
-     */
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<Map<String, Object>> handleIllegalArgument(
-            IllegalArgumentException ex) {
-        String traceId = UUID.randomUUID().toString();
-        log.warn("[ExceptionHandler] Invalid argument. " +
-                "traceId={}, error={}", traceId, ex.getMessage());
-        return ResponseEntity
-                .status(HttpStatus.BAD_REQUEST)
-                .body(errorBody(
-                        traceId,
-                        400,
-                        "BAD_REQUEST",
-                        ex.getMessage()));
-    }
+    export AWS_ACCESS_KEY_ID=your-access-key
+    export AWS_SECRET_ACCESS_KEY=your-secret-key
+    export AWS_SESSION_TOKEN=your-session-token
 
-    /**
-     * Handles @Validated constraint violations on controller params.
-     * Returns 400 Bad Request.
-     */
-    @ExceptionHandler(ConstraintViolationException.class)
-    public ResponseEntity<Map<String, Object>> handleConstraintViolation(
-            ConstraintViolationException ex) {
-        String traceId = UUID.randomUUID().toString();
-        log.warn("[ExceptionHandler] Constraint violation. " +
-                "traceId={}, error={}", traceId, ex.getMessage());
-        return ResponseEntity
-                .status(HttpStatus.BAD_REQUEST)
-                .body(errorBody(
-                        traceId,
-                        400,
-                        "BAD_REQUEST",
-                        ex.getMessage()));
-    }
+    echo "[env] All variables loaded."
+    echo "[env] AWS_REGION         = $AWS_REGION"
+    echo "[env] REDSHIFT_DATABASE  = $REDSHIFT_DATABASE"
+    echo "[env] REDSHIFT_CLUSTER_ID= $REDSHIFT_CLUSTER_ID"
+    echo "[env] REDSHIFT_DB_USER   = $REDSHIFT_DB_USER"
+    echo "[env] AWS_ACCESS_KEY_ID  = $AWS_ACCESS_KEY_ID"
+    echo "[env] Session token set  = ${AWS_SESSION_TOKEN:0:20}..."
+fi
 
-    /**
-     * Catch-all for any unexpected exception.
-     * Returns 500 Internal Server Error.
-     * Never exposes internal error details to the caller.
-     */
-    @ExceptionHandler(Exception.class)
-    public ResponseEntity<Map<String, Object>> handleGeneric(
-            Exception ex) {
-        String traceId = UUID.randomUUID().toString();
-        log.error("[ExceptionHandler] Unexpected error. " +
-                "traceId={}", traceId, ex);
-        return ResponseEntity
-                .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(errorBody(
-                        traceId,
-                        500,
-                        "INTERNAL_SERVER_ERROR",
-                        "An unexpected error occurred. " +
-                        "Please contact support with traceId: "
-                        + traceId));
-    }
-
-    // ── Private helper ─────────────────────────────────────────────
-
-    private Map<String, Object> errorBody(String traceId,
-                                           int status,
-                                           String error,
-                                           String message) {
-        return Map.of(
-                "traceId",   traceId,
-                "status",    status,
-                "error",     error,
-                "message",   message,
-                "timestamp", Instant.now().toString()
-        );
-    }
-}
+echo "[env] Done."
 ```
 
 ---
 
-### ✅ Final project structure
-```
-edp-parent/
-├── pom.xml
-├── aws-redshift-utils/
-│   ├── pom.xml
-│   └── src/main/java/com/aws/utils/redshift/
-│       ├── config/
-│       │   ├── RedshiftProperties.java
-│       │   └── RedshiftAutoConfiguration.java
-│       ├── connection/
-│       │   ├── RedshiftConnector.java
-│       │   ├── DataApiRedshiftConnector.java
-│       │   └── JdbcRedshiftConnector.java
-│       ├── executor/
-│       │   └── RedshiftQueryExecutor.java
-│       ├── model/
-│       │   ├── QueryRequest.java
-│       │   └── QueryResult.java
-│       ├── exception/
-│       │   ├── RedshiftQueryException.java
-│       │   └── RedshiftTimeoutException.java
-│       ├── health/
-│       │   └── RedshiftHealthIndicator.java
-│       └── util/
-│           ├── CredentialsProviderFactory.java
-│           └── SecretsManagerUtil.java
-└── edp-api-service/
-    ├── pom.xml
-    └── src/main/
-        ├── java/com/edp/api/
-        │   ├── controller/
-        │   │   └── RedshiftDataController.java
-        │   ├── service/
-        │   │   └── RedshiftDataService.java
-        │   └── exception/
-        │       └── GlobalExceptionHandler.java
-        └── resources/
-            └── application.yml
-```
+### Add to .gitignore immediately
 
----
-
-### 9.5 — Final build check
-
-Run this at the **root `edp-parent` level**:
+Open or create `.gitignore` in `edp-parent` root and add:
 ```
-mvn clean install -DskipTests
-```
+# Local environment variables — contains real credentials
+local-env.sh
 
-You should see:
-```
-[INFO] edp-parent .......................... SUCCESS
-[INFO] aws-redshift-utils .................. SUCCESS
-[INFO] edp-api-service ..................... SUCCESS
-[INFO] BUILD SUCCESS
-```
+# IntelliJ
+.idea/
+*.iml
 
----
-
-### 9.6 — Test the API locally
-
-Set these environment variables in IntelliJ:
-```
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your-key
-AWS_SECRET_ACCESS_KEY=your-secret
-REDSHIFT_DATABASE=your-db
-REDSHIFT_CLUSTER_ID=your-cluster-id
-REDSHIFT_DB_USER=your-db-user
-```
-
-Go to **Run** → **Edit Configurations** → your Spring Boot run config → **Environment Variables** and add them there.
-
-Then run the main class and hit:
-```
-GET http://localhost:8080/api/v1/redshift/tables/orders
-GET http://localhost:8080/api/v1/redshift/tables/orders?status=OPEN
-GET http://localhost:8080/api/v1/redshift/tables/orders/123
-GET http://localhost:8080/actuator/health/redshift
+# Maven
+target/
