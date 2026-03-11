@@ -1,28 +1,16 @@
-@Bean
-@ConditionalOnMissingBean
-@ConditionalOnProperty(
-        prefix = "redshift",
-        name = "connection-strategy",
-        havingValue = "DATA_API",
-        matchIfMissing = true)
-public RedshiftDataClient redshiftDataClient(
-        RedshiftProperties props,
-        AwsCredentialsProvider credentialsProvider) {
+@Valid
+private ProxyProperties proxy = new ProxyProperties();
 
-    log.info("[Redshift] Initialising Data API client, " +
-            "region: {}", props.getRegion());
+@Getter
+@Setter
+public static class ProxyProperties {
 
-    return RedshiftDataClient.builder()
-            .region(Region.of(props.getRegion()))
-            .credentialsProvider(credentialsProvider)
-            .httpClientBuilder(
-                ApacheHttpClient.builder()
-                    .proxyConfiguration(
-                        ProxyConfiguration.builder()
-                            .endpoint(URI.create(
-                                "http://proxy.yourcompany.com:8080"))
-                            .username("your-username")  // remove if no auth
-                            .password("your-password")  // remove if no auth
-                            .build()))
-            .build();
+    private boolean enabled = false;
+    private String host;
+
+    @Min(1) @Max(65535)
+    private int port = 8080;
+
+    private String username;
+    private String password;
 }
