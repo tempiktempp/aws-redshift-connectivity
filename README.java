@@ -1,79 +1,122 @@
-package com.edp.api.config;
+package com.edp.api.controller;
 
+import com.aws.utils.redshift.model.QueryResult;
+import com.edp.api.service.RedshiftDataService;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Pattern;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.annotation.Configuration;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
-import javax.annotation.PostConstruct;
+import java.util.List;
+import java.util.Map;
 
 /**
- * Sets JVM proxy system properties at startup.
- * Reads directly from environment variables via System.getenv()
- * so it works regardless of Spring context loading order.
+ * REST controller exposing Redshift data fetch APIs.
+ *
+ * URL structure:
+ *   /api/v1/redshift/schemas/{schema}/tables/{table}
+ *
+ * Pattern validation on path variables prevents:
+ *   - SQL injection via path e.g. crm; DROP TABLE
+ *   - Path traversal attacks
+ *   - Unexpected characters in identifiers
  */
 @Slf4j
-@Configuration
-public class ProxyInitializer {
+@Validated
+@RestController
+@RequiredArgsConstructor
+@RequestMapping("/api/v1/redshift")
+public class RedshiftDataController {
 
-    @PostConstruct
-    public void init() {
-        String proxyEnabled = System.getenv("PROXY_ENABLED");
-        String proxyHost    = System.getenv("PROXY_HOST");
-        String proxyPort    = System.getenv("PROXY_PORT");
-        String proxyUser    = System.getenv("PROXY_USERNAME");
-        String proxyPass    = System.getenv("PROXY_PASSWORD");
+    private final RedshiftDataService redshiftDataService;
 
-        // Debug — verify env vars are being read
-        log.info("[Proxy] PROXY_ENABLED  = {}", proxyEnabled);
-        log.info("[Proxy] PROXY_HOST     = {}", proxyHost);
-        log.info("[Proxy] PROXY_PORT     = {}", proxyPort);
-        log.info("[Proxy] PROXY_USERNAME = {}", proxyUser);
-        log.info("[Proxy] PROXY_PASSWORD length = {}",
-                proxyPass != null
-                        ? proxyPass.length() : "NULL");
+    /**
+     * Fetch all rows from a schema.table with optional filters.
+     *
+     * GET /api/v1/redshift/schemas/crm/tables/contact
+     * GET /api/v1/redshift/schemas/crm/tables/contact?status=OPEN
+     * GET /api/v1/redshift/schemas/crm/tables/contact?maxResults=50
+     */
+    @GetMapping("/schemas/{schemaName}/tables/{tableName}")
+    public ResponseEntity<List<Map<String, Object>>> fetchTableData(
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "schemaName must be lowercase " +
+                          "letters and underscores only")
+            String schemaName,
 
-        if (proxyHost == null || proxyHost.isBlank()) {
-            log.info("[Proxy] PROXY_HOST not set — skipping.");
-            return;
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "tableName must be lowercase " +
+                          "letters and underscores only")
+            String tableName,
+
+            @RequestParam(required = false)
+            String status,
+
+            @RequestParam(defaultValue = "100")
+            @Min(value = 1, message = "maxResults must be at least 1")
+            @Max(value = 1000, message = "maxResults cannot exceed 1000")
+            int maxResults) {
+
+        log.info("[Controller] Fetch table data. " +
+                        "schema={}, table={}, " +
+                        "status={}, maxResults={}",
+                schemaName, tableName, status, maxResults);
+
+        List<Map<String, Object>> rows =
+                redshiftDataService.fetchTableData(
+                        schemaName, tableName,
+                        status, maxResults);
+
+        return ResponseEntity.ok(rows);
+    }
+
+    /**
+     * Fetch a single row by ID.
+     *
+     * GET /api/v1/redshift/schemas/crm/tables/contact/123
+     */
+    @GetMapping("/schemas/{schemaName}/tables/{tableName}/{id}")
+    public ResponseEntity<Map<String, Object>> fetchById(
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "schemaName must be lowercase " +
+                          "letters and underscores only")
+            String schemaName,
+
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "tableName must be lowercase " +
+                          "letters and underscores only")
+            String tableName,
+
+            @PathVariable String id) {
+
+        log.info("[Controller] Fetch by ID. " +
+                        "schema={}, table={}, id={}",
+                schemaName, tableName, id);
+
+        Map<String, Object> row =
+                redshiftDataService.fetchById(
+                        schemaName, tableName, id);
+
+        if (row.isEmpty()) {
+            return ResponseEntity.notFound().build();
         }
 
-        String port = (proxyPort != null
-                && !proxyPort.isBlank())
-                ? proxyPort : "8080";
-
-        // Set JVM system properties for proxy
-        System.setProperty("https.proxyHost", proxyHost);
-        System.setProperty("https.proxyPort", port);
-        System.setProperty("http.proxyHost", proxyHost);
-        System.setProperty("http.proxyPort", port);
-        System.setProperty("http.nonProxyHosts",
-                "localhost|127.0.0.1");
-
-        log.info("[Proxy] Proxy host/port set: {}:{}",
-                proxyHost, port);
-
-        if (proxyUser != null && !proxyUser.isBlank()) {
-            System.setProperty("https.proxyUser", proxyUser);
-            System.setProperty("https.proxyPassword",
-                    proxyPass != null ? proxyPass : "");
-            System.setProperty("http.proxyUser", proxyUser);
-            System.setProperty("http.proxyPassword",
-                    proxyPass != null ? proxyPass : "");
-
-            // Critical — allows basic auth through
-            // HTTPS CONNECT tunnel
-            // Without this Java blocks proxy credentials
-            // for HTTPS by default
-            System.setProperty(
-                    "jdk.http.auth.tunneling.disabledSchemes",
-                    "");
-            System.setProperty(
-                    "jdk.http.auth.proxying.disabledSchemes",
-                    "");
-
-            log.info("[Proxy] Proxy credentials configured " +
-                    "for user: {}", proxyUser);
-        }
-
-        log.info("[Proxy] JVM proxy setup complete.");
+        return ResponseEntity.ok(row);
     }
 }
