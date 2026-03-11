@@ -1,48 +1,14 @@
-@Bean
-@ConditionalOnMissingBean
-@ConditionalOnProperty(
-        prefix = "redshift",
-        name = "connection-strategy",
-        havingValue = "DATA_API",
-        matchIfMissing = true)
-public RedshiftDataClient redshiftDataClient(
-        RedshiftProperties props,
-        AwsCredentialsProvider credentialsProvider) {
-
-    log.info("[Redshift] Initialising Data API client, " +
-            "region: {}", props.getRegion());
-
-    RedshiftDataClient.Builder builder =
-            RedshiftDataClient.builder()
-                    .region(Region.of(props.getRegion()))
-                    .credentialsProvider(credentialsProvider);
-
-    // Apply proxy config if enabled
-    if (props.getProxy().isEnabled()) {
-        log.info("[Redshift] Proxy enabled: {}:{}",
-                props.getProxy().getHost(),
-                props.getProxy().getPort());
-
-        ProxyConfiguration.Builder proxyBuilder =
-                ProxyConfiguration.builder()
-                        .endpoint(URI.create(
-                                "http://" +
-                                props.getProxy().getHost() +
-                                ":" +
-                                props.getProxy().getPort()));
-
-        // Only set credentials if proxy requires auth
-        if (props.getProxy().getUsername() != null
-                && !props.getProxy().getUsername().isBlank()) {
-            proxyBuilder
-                    .username(props.getProxy().getUsername())
-                    .password(props.getProxy().getPassword());
-        }
-
-        builder.httpClientBuilder(
-                ApacheHttpClient.builder()
-                        .proxyConfiguration(proxyBuilder.build()));
-    }
-
-    return builder.build();
-                            }
+redshift:
+  connection-strategy: DATA_API
+  credentials-strategy: ENVIRONMENT
+  region: ${AWS_REGION:us-east-1}
+  database: ${REDSHIFT_DATABASE:dev}
+  cluster-identifier: ${REDSHIFT_CLUSTER_ID:your-cluster-id}
+  db-user: ${REDSHIFT_DB_USER:your-db-user}
+  # ── Proxy (remove if not needed) ──────────────────────────────
+  proxy:
+    enabled: true
+    host: ${PROXY_HOST:proxy.yourcompany.com}
+    port: ${PROXY_PORT:8080}
+    username: ${PROXY_USERNAME:}   # leave blank if no auth needed
+    password: ${PROXY_PASSWORD:}   # leave blank if no auth needed
