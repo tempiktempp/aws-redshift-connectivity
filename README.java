@@ -1,95 +1,71 @@
-package com.edp.api.service;
+private QueryResult fetchResults(String queryId,
+                                  QueryRequest request) {
+    List<Map<String, Object>> allRows = new ArrayList<>();
+    List<QueryResult.ColumnMetadata> columnMetadata = null;
+    String nextToken = null;
 
-import com.aws.utils.redshift.executor.RedshiftQueryExecutor;
-import com.aws.utils.redshift.model.QueryRequest;
-import com.aws.utils.redshift.model.QueryResult;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
+    int maxResults = request.getMaxResults() > 0
+            ? Math.min(request.getMaxResults(),
+                       props.getQuery().getMaxResultsPerPage())
+            : props.getQuery().getMaxResultsPerPage();
 
-import java.util.List;
-import java.util.Map;
+    log.debug("[Redshift-DataAPI] Fetching results, " +
+            "maxResults cap: {}", maxResults);
 
-@Slf4j
-@Service
-@RequiredArgsConstructor
-public class RedshiftDataService {
-
-    private final RedshiftQueryExecutor queryExecutor;
-
-    public List<Map<String, Object>> fetchTableData(
-            String schemaName,
-            String tableName,
-            String status,
-            int maxResults) {
-
-        // Both schema and table are already pattern-validated
-        // in the controller — only lowercase letters and
-        // underscores allowed, safe to use as SQL identifiers
-        String qualifiedTable = schemaName + "." + tableName;
-
-        String sql = status != null
-                ? "SELECT * FROM " + qualifiedTable +
-                  " WHERE status = :status"
-                : "SELECT * FROM " + qualifiedTable;
-
-        QueryRequest.QueryRequestBuilder builder =
-                QueryRequest.builder()
-                        .sql(sql)
-                        .maxResults(maxResults)
-                        .queryLabel("fetch-" + qualifiedTable);
-
-        if (status != null) {
-            builder.parameter("status", status);
+    do {
+        // Stop fetching pages if we already have enough rows
+        if (allRows.size() >= maxResults) {
+            log.debug("[Redshift-DataAPI] Row cap reached: {}",
+                    maxResults);
+            break;
         }
 
-        return queryExecutor.queryForList(builder.build());
-    }
+        GetStatementResultRequest.Builder resultBuilder =
+                GetStatementResultRequest.builder()
+                        .id(queryId);
 
-    public Map<String, Object> fetchById(
-            String schemaName,
-            String tableName,
-            Object id) {
-
-        String qualifiedTable = schemaName + "." + tableName;
-
-        QueryRequest request = QueryRequest.builder()
-                .sql("SELECT * FROM " + qualifiedTable +
-                     " WHERE id = :id")
-                .parameter("id", id)
-                .maxResults(1)
-                .queryLabel("fetch-by-id-" + qualifiedTable)
-                .build();
-
-        return queryExecutor.queryForSingleRow(request);
-    }
-
-    public QueryResult executeCustomQuery(
-            String sql,
-            Map<String, Object> parameters,
-            int maxResults) {
-
-        QueryRequest.QueryRequestBuilder builder =
-                QueryRequest.builder()
-                        .sql(sql)
-                        .maxResults(maxResults)
-                        .queryLabel("custom-query");
-
-        if (parameters != null) {
-            parameters.forEach(builder::parameter);
+        if (nextToken != null) {
+            resultBuilder.nextToken(nextToken);
         }
 
-        return queryExecutor.executeQuery(builder.build());
-    }
+        GetStatementResultResponse response =
+                redshiftDataClient.getStatementResult(
+                        resultBuilder.build());
+
+        // Extract column metadata on first page only
+        if (columnMetadata == null) {
+            columnMetadata = extractColumnMetadata(
+                    response.columnMetadata());
+        }
+
+        // Only add rows up to the maxResults cap
+        List<QueryResult.ColumnMetadata> finalMeta =
+                columnMetadata;
+
+        for (List<Field> row : response.records()) {
+            if (allRows.size() >= maxResults) {
+                // Hit the cap mid-page — stop adding rows
+                // and clear nextToken to stop pagination
+                nextToken = null;
+                break;
+            }
+            allRows.add(mapRow(row, finalMeta));
+        }
+
+        // Only update nextToken if we haven't hit the cap
+        if (nextToken != null || allRows.size() < maxResults) {
+            nextToken = response.nextToken();
+        }
+
+    } while (nextToken != null && !nextToken.isBlank());
+
+    return QueryResult.builder()
+            .rows(Collections.unmodifiableList(allRows))
+            .columnMetadata(columnMetadata != null
+                    ? columnMetadata
+                    : Collections.emptyList())
+            .totalRows(allRows.size())
+            .queryId(queryId)
+            .strategy(STRATEGY_NAME)
+            .build();
 }
-```
-
----
-
-### Your new endpoints
-```
-GET /api/v1/redshift/schemas/crm/tables/contact
-GET /api/v1/redshift/schemas/crm/tables/contact?status=OPEN
-GET /api/v1/redshift/schemas/crm/tables/contact?maxResults=50
-GET /api/v1/redshift/schemas/crm/tables/contact/123
-GET /api/v1/redshift/schemas/crm/tables/interaction
