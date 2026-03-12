@@ -1,186 +1,98 @@
-package com.edp.api.definition.tables;
+package com.edp.api.registry;
 
-import com.edp.api.definition.ColumnPreset;
-import com.edp.api.definition.FilterTemplate;
 import com.edp.api.definition.TableDefinition;
+import com.edp.api.exception.TableNotFoundException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
- * Table definition for crm.contact.
+ * Auto-discovers and indexes all TableDefinition beans.
  *
- * Filter templates:
- *   default → open access, all contacts visible
+ * Spring injects all TableDefinition implementations
+ * automatically via constructor injection.
+ * No manual registration needed — just add @Component
+ * to a new TableDefinition and it appears here.
  *
- * Column presets:
- *   default → core contact columns
- *   summary → minimal columns
- *   full    → all columns
+ * Security note:
+ *   Only tables with a registered TableDefinition
+ *   are accessible. All others throw TableNotFoundException
+ *   before any SQL is built — unknown tables can never
+ *   be queried regardless of what the caller sends.
  */
+@Slf4j
 @Component
-public class ContactTableDefinition
-        implements TableDefinition {
+public class TableRegistry {
 
-    @Override
-    public String getSchema() {
-        return "crm";
+    private final Map<String, TableDefinition> registry;
+
+    public TableRegistry(
+            List<TableDefinition> tableDefinitions) {
+
+        this.registry = tableDefinitions.stream()
+                .collect(Collectors.toMap(
+                        TableDefinition::getRegistryKey,
+                        Function.identity()));
+
+        log.info("[TableRegistry] Registered {} table(s): {}",
+                registry.size(),
+                registry.keySet());
     }
 
-    @Override
-    public String getTable() {
-        return "contact";
+    /**
+     * Looks up a TableDefinition by schema and table name.
+     *
+     * @throws TableNotFoundException if no definition exists
+     */
+    public TableDefinition getDefinition(
+            String schema,
+            String table) {
+
+        String key = schema + "." + table;
+        TableDefinition definition = registry.get(key);
+
+        if (definition == null) {
+            log.warn("[TableRegistry] No definition " +
+                    "found for: {}", key);
+            throw new TableNotFoundException(schema, table);
+        }
+
+        log.debug("[TableRegistry] Found definition " +
+                "for: {}", key);
+
+        return definition;
     }
 
-    @Override
-    public String getDefaultFilterTemplate() {
-        return "default";
+    /**
+     * Returns true if a definition is registered
+     * for the given schema and table.
+     */
+    public boolean isRegistered(
+            String schema,
+            String table) {
+        return registry.containsKey(
+                schema + "." + table);
     }
 
-    @Override
-    public String getDefaultColumnPreset() {
-        return "default";
-    }
-
-    @Override
-    public Map<String, ColumnPreset> getColumnPresets() {
-        return Map.of(
-
-            "default", ColumnPreset.builder()
-                    .name("default")
-                    .column("id")
-                    .column("name")
-                    .column("email")
-                    .column("status")
-                    .column("created_at")
-                    .build(),
-
-            "summary", ColumnPreset.builder()
-                    .name("summary")
-                    .column("id")
-                    .column("name")
-                    .column("status")
-                    .build(),
-
-            "full", ColumnPreset.builder()
-                    .name("full")
-                    .column("id")
-                    .column("name")
-                    .column("email")
-                    .column("phone")
-                    .column("status")
-                    .column("created_at")
-                    .column("updated_at")
-                    .build()
-        );
-    }
-
-    @Override
-    public Map<String, FilterTemplate> getFilterTemplates() {
-        return Map.of(
-
-            "default", FilterTemplate.builder()
-                    .name("default")
-                    .sqlFragment("")
-                    .isCte(false)
-                    .allowedParam("status")
-                    .allowedParam("name")
-                    .build()
-        );
+    /**
+     * Returns all registered table keys.
+     * Useful for admin/diagnostic endpoints.
+     */
+    public java.util.Set<String> getRegisteredTables() {
+        return registry.keySet();
     }
 }
 ```
 
 ---
 
-### Final package structure
+### After adding this — verify startup log
+
+When the app starts you should see:
 ```
-com/edp/api/
-├── controller/
-│   └── GenericDataController.java
-├── facade/
-│   └── DataAccessFacade.java
-├── registry/
-│   └── TableRegistry.java
-├── definition/
-│   ├── TableDefinition.java
-│   ├── FilterTemplate.java
-│   ├── ColumnPreset.java
-│   └── tables/
-│       ├── InteractionTableDefinition.java
-│       └── ContactTableDefinition.java
-├── strategy/
-│   ├── DataAccessStrategy.java      ← keep for reference
-│   ├── OpenAccessStrategy.java      ← can remove
-│   └── EntitlementAccessStrategy.java ← can remove
-├── query/
-│   └── QueryBuilder.java
-├── model/
-│   ├── request/
-│   │   └── DataRequest.java
-│   └── response/
-│       └── DataResponse.java
-└── exception/
-    ├── EntitlementException.java
-    ├── TableNotFoundException.java
-    ├── InvalidTemplateException.java
-    ├── InvalidColumnPresetException.java
-    ├── InvalidFilterParamException.java
-    └── GlobalExceptionHandler.java
-```
-
----
-
-### Test endpoints
-```
-# Default template, default columns
-GET /api/v1/data/crm/interaction
-X-Employee-Id: EMP001
-
-# Entitlement template
-GET /api/v1/data/crm/interaction/views/my_team
-X-Employee-Id: EMP001
-
-# Entitlement template + summary columns
-GET /api/v1/data/crm/interaction/views/my_team?columns=summary
-X-Employee-Id: EMP001
-
-# Entitlement template + row limit
-GET /api/v1/data/crm/interaction/views/my_team?maxResults=10
-X-Employee-Id: EMP001
-
-# Unknown view → 400
-GET /api/v1/data/crm/interaction/views/unknown_view
-X-Employee-Id: EMP001
-
-# Unknown table → 404
-GET /api/v1/data/crm/unknown_table
-X-Employee-Id: EMP001
-
-# Missing header → 400
-GET /api/v1/data/crm/interaction
-
-# Contact — open access
-GET /api/v1/data/crm/contact
-X-Employee-Id: EMP001
-
-# Contact with filter
-GET /api/v1/data/crm/contact?status=ACTIVE
-X-Employee-Id: EMP001
-
-# Single row
-GET /api/v1/data/crm/interaction/INT001
-X-Employee-Id: EMP001
-```
-
----
-
-### Adding a new table — checklist
-```
-1. Create NewTableDefinition.java in definition/tables/
-2. Implement getSchema(), getTable()
-3. Define column presets in getColumnPresets()
-4. Define filter templates in getFilterTemplates()
-5. Set default template and column preset
-6. Add @Component
-7. Done — zero other changes needed
+[TableRegistry] Registered 2 table(s): 
+    [crm.interaction, crm.contact]
