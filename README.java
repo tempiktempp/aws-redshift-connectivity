@@ -1,18 +1,19 @@
 package com.edp.api.exception;
 
 /**
- * Thrown when caller requests a template name
+ * Thrown when caller requests a column preset name
  * that does not exist in the TableDefinition.
  * Maps to 400 Bad Request.
  */
-public class InvalidTemplateException
+public class InvalidColumnPresetException
         extends RuntimeException {
 
-    public InvalidTemplateException(
-            String templateName,
+    public InvalidColumnPresetException(
+            String presetName,
             String schema,
             String table) {
-        super("Template '" + templateName + "' does not " +
-              "exist for table: " + schema + "." + table);
+        super("Column preset '" + presetName + "' does " +
+              "not exist for table: " +
+              schema + "." + table);
     }
         }
