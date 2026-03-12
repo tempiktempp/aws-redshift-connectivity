@@ -1,67 +1,64 @@
-WITH team_employees AS (
-    -- Step 1: find the team of the requesting employee
-    -- Step 2: get all employees in that same team
-    SELECT e.emp_id
-    FROM dto.entitlement e
-    WHERE e.team_id = (
-        SELECT team_id
-        FROM dto.entitlement
-        WHERE emp_id = 'EMP001'
-        LIMIT 1
-    )
-),
-entitled_interactions AS (
-    -- Step 3: get interactions where a team
-    -- employee was the interacting employee
-    SELECT
-        i.id              AS interaction_id,
-        i.employee_id,
-        i.interaction_date,
-        i.interaction_type,
-        i.created_at
-    FROM crm.interaction i
-    WHERE i.employee_id IN (
-        SELECT emp_id FROM team_employees
-    )
-)
--- Step 4: join with child tables
-SELECT
-    ei.interaction_id,
-    ei.employee_id,
-    ei.interaction_date,
-    ei.interaction_type,
-    ei.created_at,
-    s.notes,
-    a.emp_id            AS attendee_emp_id,
-    a.attendee_name,
-    a.attendee_role
-FROM entitled_interactions ei
-LEFT JOIN crm.interaction_summary s
-    ON s.interaction_id = ei.interaction_id
-LEFT JOIN crm.interaction_attendee a
-    ON a.interaction_id = ei.interaction_id
-ORDER BY ei.interaction_date DESC,
-         ei.interaction_id
-LIMIT 100;
+package com.edp.api.definition;
 
+import lombok.Builder;
+import lombok.Getter;
+import lombok.Singular;
 
-Step 1 — Check entitlement table has data:
-SELECT * FROM dto.entitlement LIMIT 10;
+import java.util.Map;
+import java.util.Set;
 
-Step 2 — Check team lookup works:
-SELECT team_id
-FROM dto.entitlement
-WHERE emp_id = 'EMP001';
+/**
+ * Defines a named filter template for a table.
+ *
+ * A filter template has two parts:
+ *
+ *   1. Fixed SQL fragment — always applied when this
+ *      template is selected. Can be empty (open access),
+ *      a simple WHERE clause, or a full CTE.
+ *
+ *   2. Allowed dynamic params — URL params the caller
+ *      is allowed to pass on top of the fixed fragment.
+ *      All combined with AND.
+ *      Unknown params → 400 Bad Request.
+ *
+ * isCte = true means sqlFragment wraps the entire
+ * base SELECT as a CTE rather than appending as WHERE.
+ */
+@Getter
+@Builder
+public class FilterTemplate {
 
-Step 3 — Check team employees:
-SELECT emp_id
-FROM dto.entitlement
-WHERE team_id = 'YOUR_TEAM_ID';
+    /** Unique name within the table definition */
+    private final String name;
 
-Step 4 — Check interactions exist for those employees:
-SELECT *
-FROM crm.interaction
-WHERE employee_id IN ('EMP001', 'EMP002')
-LIMIT 10;
+    /**
+     * Fixed SQL fragment for this template.
+     * Empty string = no fixed filters (open access).
+     * CTE string = full entitlement wrapper.
+     */
+    @Builder.Default
+    private final String sqlFragment = "";
 
-  
+    /**
+     * When true, sqlFragment is a CTE that wraps
+     * the entire base SELECT.
+     * The base SELECT is injected via %s placeholder.
+     * When false, sqlFragment appended as WHERE conditions.
+     */
+    @Builder.Default
+    private final boolean isCte = false;
+
+    /**
+     * URL param names allowed dynamically on top
+     * of this template. Unknown params → 400.
+     */
+    @Singular("allowedParam")
+    private final Set<String> allowedParams;
+
+    /**
+     * Default values for named parameters in sqlFragment.
+     * Applied when caller does not supply them.
+     */
+    @Singular("defaultParam")
+    private final Map<String, Object> defaultParams;
+}
