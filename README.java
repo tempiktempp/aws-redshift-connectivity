@@ -1,16 +1,15 @@
-package com.edp.api.exception;
-
-/**
- * Thrown when no TableDefinition is registered
- * for the requested schema.table combination.
- * Maps to 404 Not Found in GlobalExceptionHandler.
- */
-public class TableNotFoundException extends RuntimeException {
-
-    public TableNotFoundException(
-            String schema,
-            String table) {
-        super("No table definition registered for: "
-                + schema + "." + table);
-    }
+@ExceptionHandler(TableNotFoundException.class)
+public ResponseEntity<Map<String, Object>> handleTableNotFound(
+        TableNotFoundException ex) {
+    String traceId = UUID.randomUUID().toString();
+    log.warn("[ExceptionHandler] Table not found. " +
+            "traceId={}, error={}",
+            traceId, ex.getMessage());
+    return ResponseEntity
+            .status(HttpStatus.NOT_FOUND)
+            .body(errorBody(
+                    traceId,
+                    404,
+                    "NOT_FOUND",
+                    ex.getMessage()));
 }
