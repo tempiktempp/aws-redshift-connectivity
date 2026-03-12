@@ -1,50 +1,33 @@
-package com.edp.api.model.request;
+package com.edp.api.model.response;
 
 import lombok.Builder;
 import lombok.Getter;
 
+import java.util.List;
 import java.util.Map;
 
 /**
- * Encapsulates all data needed to execute a data request.
- * Passed from controller through facade to query builder.
+ * Generic response wrapper for all data fetch endpoints.
  */
 @Getter
 @Builder
-public class DataRequest {
+public class DataResponse {
 
-    /** Requesting employee — drives entitlement logic */
-    private final String employeeId;
+    /** Schema queried */
+    private final String schema;
 
-    /** Schema name — validated against TableDefinition */
-    private final String schemaName;
+    /** Table queried */
+    private final String table;
 
-    /** Table name — validated against TableDefinition */
-    private final String tableName;
+    /** Filter template applied */
+    private final String appliedTemplate;
 
-    /** Optional row ID for single row lookups */
-    private final String id;
+    /** Column preset applied */
+    private final String appliedColumnPreset;
 
-    /**
-     * Filter template name selected by caller.
-     * Null means use the table's default template.
-     */
-    private final String templateName;
+    /** Number of rows returned */
+    private final int totalRows;
 
-    /**
-     * Column preset name selected by caller.
-     * Null means use the table's default column preset.
-     */
-    private final String columnPreset;
-
-    /** Max rows to return */
-    @Builder.Default
-    private final int maxResults = 100;
-
-    /**
-     * Dynamic filter params passed by caller.
-     * Must be declared in template's allowedParams.
-     * Values bound as named parameters — never in SQL.
-     */
-    private final Map<String, String> filterParams;
+    /** Data rows — column name to value */
+    private final List<Map<String, Object>> rows;
 }
