@@ -1,19 +1,18 @@
 package com.edp.api.exception;
 
 /**
- * Thrown when caller requests a column preset name
- * that does not exist in the TableDefinition.
+ * Thrown when caller passes a filter param
+ * not declared in the template's allowedParams.
  * Maps to 400 Bad Request.
  */
-public class InvalidColumnPresetException
+public class InvalidFilterParamException
         extends RuntimeException {
 
-    public InvalidColumnPresetException(
-            String presetName,
-            String schema,
-            String table) {
-        super("Column preset '" + presetName + "' does " +
-              "not exist for table: " +
-              schema + "." + table);
+    public InvalidFilterParamException(
+            String paramName,
+            String templateName) {
+        super("Filter param '" + paramName + "' is not " +
+              "allowed for template: '" + templateName +
+              "'");
     }
         }
