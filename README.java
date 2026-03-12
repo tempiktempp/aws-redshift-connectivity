@@ -1,30 +1,18 @@
-package com.edp.api.definition;
-
-import lombok.Builder;
-import lombok.Getter;
-import lombok.Singular;
-
-import java.util.Set;
+package com.edp.api.exception;
 
 /**
- * Defines a named column preset for a table.
- *
- * Each preset declares exactly which columns are
- * returned when it is selected.
- *
- * Examples:
- *   default  → core columns only
- *   summary  → minimal columns for list views
- *   full     → all available columns
+ * Thrown when caller requests a template name
+ * that does not exist in the TableDefinition.
+ * Maps to 400 Bad Request.
  */
-@Getter
-@Builder
-public class ColumnPreset {
+public class InvalidTemplateException
+        extends RuntimeException {
 
-    /** Unique name within the table definition */
-    private final String name;
-
-    /** Columns returned when this preset is selected */
-    @Singular("column")
-    private final Set<String> columns;
-}
+    public InvalidTemplateException(
+            String templateName,
+            String schema,
+            String table) {
+        super("Template '" + templateName + "' does not " +
+              "exist for table: " + schema + "." + table);
+    }
+        }
