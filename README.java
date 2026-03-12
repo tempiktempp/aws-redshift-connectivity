@@ -1,163 +1,238 @@
-package com.edp.api.facade;
+package com.edp.api.controller;
 
-import com.aws.utils.redshift.executor.RedshiftQueryExecutor;
-import com.aws.utils.redshift.model.QueryRequest;
-import com.edp.api.definition.ColumnPreset;
-import com.edp.api.definition.FilterTemplate;
-import com.edp.api.definition.TableDefinition;
-import com.edp.api.exception.InvalidColumnPresetException;
-import com.edp.api.exception.InvalidTemplateException;
+import com.edp.api.facade.DataAccessFacade;
 import com.edp.api.model.request.DataRequest;
 import com.edp.api.model.response.DataResponse;
-import com.edp.api.query.QueryBuilder;
-import com.edp.api.registry.TableRegistry;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
-import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Orchestrates the full data access flow.
+ * Single generic controller for ALL table endpoints.
  *
- * Flow:
- *   1. Look up TableDefinition → 404 if unknown
- *   2. Resolve filter template → 400 if unknown
- *   3. Resolve column preset  → 400 if unknown
- *   4. Build safe SQL via QueryBuilder
- *   5. Execute via RedshiftQueryExecutor
- *   6. Return DataResponse
+ * URL structure:
+ *   GET /api/v1/data/{schema}/{table}
+ *   GET /api/v1/data/{schema}/{table}/views/{view}
+ *   GET /api/v1/data/{schema}/{table}/{id}
+ *
+ * Adding a new table = zero changes here.
+ * Just register a new TableDefinition bean.
  */
 @Slf4j
-@Component
+@Validated
+@RestController
 @RequiredArgsConstructor
-public class DataAccessFacade {
+@RequestMapping("/api/v1/data")
+public class GenericDataController {
 
-    private final TableRegistry tableRegistry;
-    private final QueryBuilder queryBuilder;
-    private final RedshiftQueryExecutor queryExecutor;
+    private final DataAccessFacade dataAccessFacade;
 
-    public DataResponse fetchData(DataRequest request) {
+    // Internal params that must not be treated as filters
+    private static final java.util.Set<String>
+            RESERVED_PARAMS = java.util.Set.of(
+                    "maxResults", "columns");
 
-        log.info("[DataAccessFacade] Request: " +
-                "employee={}, schema={}, table={}, " +
-                "template={}, columns={}, maxResults={}",
-                request.getEmployeeId(),
-                request.getSchemaName(),
-                request.getTableName(),
-                request.getTemplateName(),
-                request.getColumnPreset(),
-                request.getMaxResults());
+    /**
+     * Fetch with default template.
+     *
+     * GET /api/v1/data/crm/interaction
+     * GET /api/v1/data/crm/interaction?columns=summary
+     * GET /api/v1/data/crm/interaction?maxResults=50
+     * GET /api/v1/data/crm/interaction?status=OPEN
+     */
+    @GetMapping("/{schemaName}/{tableName}")
+    public ResponseEntity<DataResponse> fetchWithDefaultView(
+            @RequestHeader("X-Employee-Id")
+            @NotBlank(message =
+                    "X-Employee-Id header is required")
+            String employeeId,
 
-        // Step 1 — resolve table definition
-        // Unknown table → 404 before any SQL is built
-        TableDefinition definition =
-                tableRegistry.getDefinition(
-                        request.getSchemaName(),
-                        request.getTableName());
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "schemaName must be lowercase " +
+                          "letters and underscores only")
+            String schemaName,
 
-        // Step 2 — resolve filter template
-        FilterTemplate template =
-                resolveTemplate(request, definition);
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "tableName must be lowercase " +
+                          "letters and underscores only")
+            String tableName,
 
-        // Step 3 — resolve column preset
-        ColumnPreset columnPreset =
-                resolveColumnPreset(request, definition);
+            @RequestParam(required = false)
+            String columns,
 
-        // Step 4 — build safe SQL
-        QueryBuilder.QueryComponents queryComponents =
-                queryBuilder.build(
-                        definition,
-                        template,
-                        columnPreset,
-                        request);
+            @RequestParam(required = false)
+            @Min(value = 1,
+                 message = "maxResults must be at least 1")
+            @Max(value = 1000,
+                 message = "maxResults cannot exceed 1000")
+            Integer maxResults,
 
-        // Step 5 — execute
-        QueryRequest.QueryRequestBuilder queryBuilder =
-                QueryRequest.builder()
-                        .sql(queryComponents.sql())
-                        .maxResults(request.getMaxResults())
-                        .queryLabel(
-                                definition.getSchema() +
-                                "-" +
-                                definition.getTable() +
-                                "-" +
-                                template.getName());
+            @RequestParam(required = false)
+            Map<String, String> allParams) {
 
-        // Bind all parameters
-        queryComponents.parameters()
-                .forEach(queryBuilder::parameter);
+        return ResponseEntity.ok(
+                dataAccessFacade.fetchData(
+                        buildRequest(
+                                employeeId,
+                                schemaName,
+                                tableName,
+                                null,
+                                columns,
+                                maxResults,
+                                extractFilterParams(
+                                        allParams))));
+    }
 
-        List<Map<String, Object>> rows =
-                queryExecutor.queryForList(
-                        queryBuilder.build());
+    /**
+     * Fetch with named view (filter template).
+     *
+     * GET /api/v1/data/crm/interaction/views/my_team
+     * GET /api/v1/data/crm/interaction/views/my_team?columns=summary
+     * GET /api/v1/data/crm/interaction/views/my_team?maxResults=50
+     */
+    @GetMapping("/{schemaName}/{tableName}/views/{viewName}")
+    public ResponseEntity<DataResponse> fetchWithView(
+            @RequestHeader("X-Employee-Id")
+            @NotBlank(message =
+                    "X-Employee-Id header is required")
+            String employeeId,
 
-        log.info("[DataAccessFacade] Rows returned: {}",
-                rows.size());
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "schemaName must be lowercase " +
+                          "letters and underscores only")
+            String schemaName,
 
-        // Step 6 — wrap and return
-        return DataResponse.builder()
-                .schema(request.getSchemaName())
-                .table(request.getTableName())
-                .appliedTemplate(template.getName())
-                .appliedColumnPreset(columnPreset.getName())
-                .totalRows(rows.size())
-                .rows(rows)
-                .build();
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "tableName must be lowercase " +
+                          "letters and underscores only")
+            String tableName,
+
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "viewName must be lowercase " +
+                          "letters and underscores only")
+            String viewName,
+
+            @RequestParam(required = false)
+            String columns,
+
+            @RequestParam(required = false)
+            @Min(value = 1,
+                 message = "maxResults must be at least 1")
+            @Max(value = 1000,
+                 message = "maxResults cannot exceed 1000")
+            Integer maxResults,
+
+            @RequestParam(required = false)
+            Map<String, String> allParams) {
+
+        return ResponseEntity.ok(
+                dataAccessFacade.fetchData(
+                        buildRequest(
+                                employeeId,
+                                schemaName,
+                                tableName,
+                                viewName,
+                                columns,
+                                maxResults,
+                                extractFilterParams(
+                                        allParams))));
+    }
+
+    /**
+     * Fetch single row by ID.
+     *
+     * GET /api/v1/data/crm/interaction/INT001
+     */
+    @GetMapping("/{schemaName}/{tableName}/{id}")
+    public ResponseEntity<DataResponse> fetchById(
+            @RequestHeader("X-Employee-Id")
+            @NotBlank(message =
+                    "X-Employee-Id header is required")
+            String employeeId,
+
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "schemaName must be lowercase " +
+                          "letters and underscores only")
+            String schemaName,
+
+            @PathVariable
+            @Pattern(
+                regexp = "^[a-z_]{1,64}$",
+                message = "tableName must be lowercase " +
+                          "letters and underscores only")
+            String tableName,
+
+            @PathVariable String id) {
+
+        return ResponseEntity.ok(
+                dataAccessFacade.fetchData(
+                        DataRequest.builder()
+                                .employeeId(employeeId)
+                                .schemaName(schemaName)
+                                .tableName(tableName)
+                                .id(id)
+                                .maxResults(1)
+                                .build()));
     }
 
     // ── Private helpers ────────────────────────────────────────────
 
-    private FilterTemplate resolveTemplate(
-            DataRequest request,
-            TableDefinition definition) {
+    private DataRequest buildRequest(
+            String employeeId,
+            String schemaName,
+            String tableName,
+            String viewName,
+            String columns,
+            Integer maxResults,
+            Map<String, String> filterParams) {
 
-        String templateName = request.getTemplateName() != null
-                && !request.getTemplateName().isBlank()
-                ? request.getTemplateName()
-                : definition.getDefaultFilterTemplate();
-
-        FilterTemplate template =
-                definition.getFilterTemplates()
-                        .get(templateName);
-
-        if (template == null) {
-            throw new InvalidTemplateException(
-                    templateName,
-                    request.getSchemaName(),
-                    request.getTableName());
-        }
-
-        log.debug("[DataAccessFacade] Template resolved: {}",
-                templateName);
-
-        return template;
+        return DataRequest.builder()
+                .employeeId(employeeId)
+                .schemaName(schemaName)
+                .tableName(tableName)
+                .templateName(viewName)
+                .columnPreset(columns)
+                .maxResults(maxResults != null
+                        ? maxResults : 100)
+                .filterParams(filterParams)
+                .build();
     }
 
-    private ColumnPreset resolveColumnPreset(
-            DataRequest request,
-            TableDefinition definition) {
-
-        String presetName = request.getColumnPreset() != null
-                && !request.getColumnPreset().isBlank()
-                ? request.getColumnPreset()
-                : definition.getDefaultColumnPreset();
-
-        ColumnPreset preset =
-                definition.getColumnPresets()
-                        .get(presetName);
-
-        if (preset == null) {
-            throw new InvalidColumnPresetException(
-                    presetName,
-                    request.getSchemaName(),
-                    request.getTableName());
-        }
-
-        log.debug("[DataAccessFacade] Column preset: {}",
-                presetName);
-
-        return preset;
+    /**
+     * Strips reserved params from allParams map
+     * so only actual data filters are passed through.
+     */
+    private Map<String, String> extractFilterParams(
+            Map<String, String> allParams) {
+        if (allParams == null) return Map.of();
+        Map<String, String> filters = new HashMap<>(allParams);
+        RESERVED_PARAMS.forEach(filters::remove);
+        return filters;
     }
             }
