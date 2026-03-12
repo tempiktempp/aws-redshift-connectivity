@@ -8,67 +8,19 @@ import org.springframework.stereotype.Component;
 import java.util.Map;
 
 /**
- * Table definition for crm.interaction.
+ * Table definition for crm.contact.
  *
  * Filter templates:
- *   default  → open access, no fixed filters
- *   my_team  → entitlement CTE, team-filtered
+ *   default → open access, all contacts visible
  *
  * Column presets:
- *   default  → core interaction columns
- *   summary  → minimal columns for list views
- *   full     → all columns including child table data
+ *   default → core contact columns
+ *   summary → minimal columns
+ *   full    → all columns
  */
 @Component
-public class InteractionTableDefinition
+public class ContactTableDefinition
         implements TableDefinition {
-
-    /**
-     * Entitlement CTE template.
-     * Wraps base SELECT with team-based filtering.
-     * %s is replaced with the base SELECT at runtime.
-     */
-    private static final String ENTITLEMENT_CTE =
-            """
-            WITH team_employees AS (
-                SELECT emp_id
-                FROM dto.entitlement
-                WHERE team_id = (
-                    SELECT team_id
-                    FROM dto.entitlement
-                    WHERE emp_id = :employeeId
-                    LIMIT 1
-                )
-            ),
-            base_data AS (%s),
-            entitled_data AS (
-                SELECT bd.*
-                FROM base_data bd
-                WHERE bd.employee_id IN (
-                    SELECT emp_id FROM team_employees
-                )
-            ),
-            with_summary AS (
-                SELECT
-                    ed.*,
-                    s.notes
-                FROM entitled_data ed
-                LEFT JOIN crm.interaction_summary s
-                    ON s.interaction_id = ed.id
-            ),
-            with_attendees AS (
-                SELECT
-                    ws.*,
-                    a.emp_id        AS attendee_emp_id,
-                    a.attendee_name,
-                    a.attendee_role
-                FROM with_summary ws
-                LEFT JOIN crm.interaction_attendee a
-                    ON a.interaction_id = ws.id
-            )
-            SELECT * FROM with_attendees
-            ORDER BY interaction_date DESC, id
-            """;
 
     @Override
     public String getSchema() {
@@ -77,7 +29,7 @@ public class InteractionTableDefinition
 
     @Override
     public String getTable() {
-        return "interaction";
+        return "contact";
     }
 
     @Override
@@ -97,26 +49,28 @@ public class InteractionTableDefinition
             "default", ColumnPreset.builder()
                     .name("default")
                     .column("id")
-                    .column("employee_id")
-                    .column("interaction_date")
-                    .column("interaction_type")
+                    .column("name")
+                    .column("email")
+                    .column("status")
                     .column("created_at")
                     .build(),
 
             "summary", ColumnPreset.builder()
                     .name("summary")
                     .column("id")
-                    .column("interaction_date")
-                    .column("interaction_type")
+                    .column("name")
+                    .column("status")
                     .build(),
 
             "full", ColumnPreset.builder()
                     .name("full")
                     .column("id")
-                    .column("employee_id")
-                    .column("interaction_date")
-                    .column("interaction_type")
+                    .column("name")
+                    .column("email")
+                    .column("phone")
+                    .column("status")
                     .column("created_at")
+                    .column("updated_at")
                     .build()
         );
     }
@@ -125,23 +79,108 @@ public class InteractionTableDefinition
     public Map<String, FilterTemplate> getFilterTemplates() {
         return Map.of(
 
-            // Open access — no fixed filters
             "default", FilterTemplate.builder()
                     .name("default")
                     .sqlFragment("")
                     .isCte(false)
-                    .allowedParam("interaction_type")
                     .allowedParam("status")
-                    .build(),
-
-            // Entitlement CTE — team filtered with joins
-            "my_team", FilterTemplate.builder()
-                    .name("my_team")
-                    .sqlFragment(ENTITLEMENT_CTE)
-                    .isCte(true)
-                    .allowedParam("interaction_type")
-                    .allowedParam("status")
+                    .allowedParam("name")
                     .build()
         );
     }
-                }
+}
+```
+
+---
+
+### Final package structure
+```
+com/edp/api/
+├── controller/
+│   └── GenericDataController.java
+├── facade/
+│   └── DataAccessFacade.java
+├── registry/
+│   └── TableRegistry.java
+├── definition/
+│   ├── TableDefinition.java
+│   ├── FilterTemplate.java
+│   ├── ColumnPreset.java
+│   └── tables/
+│       ├── InteractionTableDefinition.java
+│       └── ContactTableDefinition.java
+├── strategy/
+│   ├── DataAccessStrategy.java      ← keep for reference
+│   ├── OpenAccessStrategy.java      ← can remove
+│   └── EntitlementAccessStrategy.java ← can remove
+├── query/
+│   └── QueryBuilder.java
+├── model/
+│   ├── request/
+│   │   └── DataRequest.java
+│   └── response/
+│       └── DataResponse.java
+└── exception/
+    ├── EntitlementException.java
+    ├── TableNotFoundException.java
+    ├── InvalidTemplateException.java
+    ├── InvalidColumnPresetException.java
+    ├── InvalidFilterParamException.java
+    └── GlobalExceptionHandler.java
+```
+
+---
+
+### Test endpoints
+```
+# Default template, default columns
+GET /api/v1/data/crm/interaction
+X-Employee-Id: EMP001
+
+# Entitlement template
+GET /api/v1/data/crm/interaction/views/my_team
+X-Employee-Id: EMP001
+
+# Entitlement template + summary columns
+GET /api/v1/data/crm/interaction/views/my_team?columns=summary
+X-Employee-Id: EMP001
+
+# Entitlement template + row limit
+GET /api/v1/data/crm/interaction/views/my_team?maxResults=10
+X-Employee-Id: EMP001
+
+# Unknown view → 400
+GET /api/v1/data/crm/interaction/views/unknown_view
+X-Employee-Id: EMP001
+
+# Unknown table → 404
+GET /api/v1/data/crm/unknown_table
+X-Employee-Id: EMP001
+
+# Missing header → 400
+GET /api/v1/data/crm/interaction
+
+# Contact — open access
+GET /api/v1/data/crm/contact
+X-Employee-Id: EMP001
+
+# Contact with filter
+GET /api/v1/data/crm/contact?status=ACTIVE
+X-Employee-Id: EMP001
+
+# Single row
+GET /api/v1/data/crm/interaction/INT001
+X-Employee-Id: EMP001
+```
+
+---
+
+### Adding a new table — checklist
+```
+1. Create NewTableDefinition.java in definition/tables/
+2. Implement getSchema(), getTable()
+3. Define column presets in getColumnPresets()
+4. Define filter templates in getFilterTemplates()
+5. Set default template and column preset
+6. Add @Component
+7. Done — zero other changes needed
