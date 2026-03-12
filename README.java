@@ -1,61 +1,50 @@
-package com.edp.api.definition;
+package com.edp.api.model.request;
+
+import lombok.Builder;
+import lombok.Getter;
 
 import java.util.Map;
 
 /**
- * Defines the full configuration for a single Redshift table.
- *
- * Every table accessible via the API must have exactly one
- * TableDefinition registered as a Spring bean.
- *
- * Unknown tables are rejected at facade level before
- * any SQL is built — critical security control.
- *
- * Adding a new table:
- *   1. Create a class implementing TableDefinition
- *   2. Annotate with @Component
- *   3. Define column presets, filter templates, strategies
- *   4. Done — zero other changes needed
+ * Encapsulates all data needed to execute a data request.
+ * Passed from controller through facade to query builder.
  */
-public interface TableDefinition {
+@Getter
+@Builder
+public class DataRequest {
 
-    /** Redshift schema name e.g. "crm" */
-    String getSchema();
+    /** Requesting employee — drives entitlement logic */
+    private final String employeeId;
 
-    /** Redshift table name e.g. "interaction" */
-    String getTable();
+    /** Schema name — validated against TableDefinition */
+    private final String schemaName;
 
-    /**
-     * All named column presets for this table.
-     * Key = preset name e.g. "default", "summary", "full"
-     * Value = ColumnPreset defining which columns to return
-     */
-    Map<String, ColumnPreset> getColumnPresets();
+    /** Table name — validated against TableDefinition */
+    private final String tableName;
 
-    /**
-     * All named filter templates for this table.
-     * Key = template name e.g. "default", "my_team"
-     * Value = FilterTemplate defining SQL + allowed params
-     */
-    Map<String, FilterTemplate> getFilterTemplates();
+    /** Optional row ID for single row lookups */
+    private final String id;
 
     /**
-     * Name of the default column preset.
-     * Applied when caller does not specify ?columns=
+     * Filter template name selected by caller.
+     * Null means use the table's default template.
      */
-    String getDefaultColumnPreset();
+    private final String templateName;
 
     /**
-     * Name of the default filter template.
-     * Applied when caller does not specify a view name.
+     * Column preset name selected by caller.
+     * Null means use the table's default column preset.
      */
-    String getDefaultFilterTemplate();
+    private final String columnPreset;
+
+    /** Max rows to return */
+    @Builder.Default
+    private final int maxResults = 100;
 
     /**
-     * Unique registry key — do not override.
-     * Used by TableRegistry for lookup.
+     * Dynamic filter params passed by caller.
+     * Must be declared in template's allowedParams.
+     * Values bound as named parameters — never in SQL.
      */
-    default String getRegistryKey() {
-        return getSchema() + "." + getTable();
-    }
+    private final Map<String, String> filterParams;
 }
