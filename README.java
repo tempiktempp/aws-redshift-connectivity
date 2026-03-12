@@ -1,200 +1,163 @@
-package com.edp.api.query;
+package com.edp.api.facade;
 
+import com.aws.utils.redshift.executor.RedshiftQueryExecutor;
+import com.aws.utils.redshift.model.QueryRequest;
 import com.edp.api.definition.ColumnPreset;
 import com.edp.api.definition.FilterTemplate;
 import com.edp.api.definition.TableDefinition;
-import com.edp.api.exception.InvalidFilterParamException;
+import com.edp.api.exception.InvalidColumnPresetException;
+import com.edp.api.exception.InvalidTemplateException;
 import com.edp.api.model.request.DataRequest;
+import com.edp.api.model.response.DataResponse;
+import com.edp.api.query.QueryBuilder;
+import com.edp.api.registry.TableRegistry;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
- * Builds safe parameterized SQL from a TableDefinition,
- * FilterTemplate and DataRequest.
+ * Orchestrates the full data access flow.
  *
- * Security guarantees:
- *   - Column identifiers come ONLY from ColumnPreset
- *   - Table/schema identifiers come ONLY from TableDefinition
- *   - Filter keys validated against template allowedParams
- *   - All filter values bound as named parameters
- *   - Unknown filter params → 400 Bad Request
+ * Flow:
+ *   1. Look up TableDefinition → 404 if unknown
+ *   2. Resolve filter template → 400 if unknown
+ *   3. Resolve column preset  → 400 if unknown
+ *   4. Build safe SQL via QueryBuilder
+ *   5. Execute via RedshiftQueryExecutor
+ *   6. Return DataResponse
  */
 @Slf4j
 @Component
-public class QueryBuilder {
+@RequiredArgsConstructor
+public class DataAccessFacade {
 
-    /**
-     * Builds SQL and parameter map for the given request.
-     *
-     * Flow:
-     *   1. Build SELECT clause from column preset
-     *   2. Build FROM clause from table definition
-     *   3. Apply filter template (CTE or WHERE)
-     *   4. Append dynamic params as AND conditions
-     *   5. Apply ID filter if present
-     *
-     * @return QueryComponents with final SQL and parameters
-     */
-    public QueryComponents build(
-            TableDefinition definition,
-            FilterTemplate template,
-            ColumnPreset columnPreset,
-            DataRequest request) {
+    private final TableRegistry tableRegistry;
+    private final QueryBuilder queryBuilder;
+    private final RedshiftQueryExecutor queryExecutor;
 
-        // All parameters collected here —
-        // template defaults first, then caller params
-        Map<String, Object> parameters =
-                new LinkedHashMap<>();
+    public DataResponse fetchData(DataRequest request) {
 
-        // Apply template default params first
-        if (template.getDefaultParams() != null) {
-            parameters.putAll(
-                    template.getDefaultParams());
-        }
+        log.info("[DataAccessFacade] Request: " +
+                "employee={}, schema={}, table={}, " +
+                "template={}, columns={}, maxResults={}",
+                request.getEmployeeId(),
+                request.getSchemaName(),
+                request.getTableName(),
+                request.getTemplateName(),
+                request.getColumnPreset(),
+                request.getMaxResults());
 
-        // Validate and collect dynamic filter params
-        if (request.getFilterParams() != null) {
-            request.getFilterParams()
-                    .forEach((key, value) -> {
-                        if (!template.getAllowedParams()
-                                .contains(key)) {
-                            throw new InvalidFilterParamException(
-                                    key,
-                                    template.getName());
-                        }
-                        // Caller param overrides default
-                        parameters.put(key, value);
-                    });
-        }
+        // Step 1 — resolve table definition
+        // Unknown table → 404 before any SQL is built
+        TableDefinition definition =
+                tableRegistry.getDefinition(
+                        request.getSchemaName(),
+                        request.getTableName());
 
-        // Add employeeId for entitlement templates
-        parameters.put("employeeId",
-                request.getEmployeeId());
+        // Step 2 — resolve filter template
+        FilterTemplate template =
+                resolveTemplate(request, definition);
 
-        String sql;
+        // Step 3 — resolve column preset
+        ColumnPreset columnPreset =
+                resolveColumnPreset(request, definition);
 
-        if (request.getId() != null
-                && !request.getId().isBlank()) {
-            // Single row by ID — simple SELECT
-            sql = buildIdQuery(
-                    definition, columnPreset, request);
-            parameters.put("id", request.getId());
+        // Step 4 — build safe SQL
+        QueryBuilder.QueryComponents queryComponents =
+                queryBuilder.build(
+                        definition,
+                        template,
+                        columnPreset,
+                        request);
 
-        } else if (template.isCte()) {
-            // CTE template wraps base SELECT entirely
-            sql = buildCteQuery(
-                    definition, template, columnPreset,
-                    parameters);
+        // Step 5 — execute
+        QueryRequest.QueryRequestBuilder queryBuilder =
+                QueryRequest.builder()
+                        .sql(queryComponents.sql())
+                        .maxResults(request.getMaxResults())
+                        .queryLabel(
+                                definition.getSchema() +
+                                "-" +
+                                definition.getTable() +
+                                "-" +
+                                template.getName());
 
-        } else {
-            // Standard SELECT with optional WHERE
-            sql = buildStandardQuery(
-                    definition, template, columnPreset,
-                    parameters);
-        }
+        // Bind all parameters
+        queryComponents.parameters()
+                .forEach(queryBuilder::parameter);
 
-        log.debug("[QueryBuilder] SQL: {}", sql);
-        log.debug("[QueryBuilder] Param keys: {}",
-                parameters.keySet());
+        List<Map<String, Object>> rows =
+                queryExecutor.queryForList(
+                        queryBuilder.build());
 
-        return new QueryComponents(sql, parameters);
+        log.info("[DataAccessFacade] Rows returned: {}",
+                rows.size());
+
+        // Step 6 — wrap and return
+        return DataResponse.builder()
+                .schema(request.getSchemaName())
+                .table(request.getTableName())
+                .appliedTemplate(template.getName())
+                .appliedColumnPreset(columnPreset.getName())
+                .totalRows(rows.size())
+                .rows(rows)
+                .build();
     }
 
-    // ── Private builders ───────────────────────────────────────────
+    // ── Private helpers ────────────────────────────────────────────
 
-    private String buildIdQuery(
-            TableDefinition definition,
-            ColumnPreset columnPreset,
-            DataRequest request) {
-        return "SELECT " +
-                buildSelectClause(columnPreset) +
-                " FROM " +
-                definition.getSchema() + "." +
-                definition.getTable() +
-                " WHERE id = :id";
-    }
+    private FilterTemplate resolveTemplate(
+            DataRequest request,
+            TableDefinition definition) {
 
-    private String buildCteQuery(
-            TableDefinition definition,
-            FilterTemplate template,
-            ColumnPreset columnPreset,
-            Map<String, Object> parameters) {
+        String templateName = request.getTemplateName() != null
+                && !request.getTemplateName().isBlank()
+                ? request.getTemplateName()
+                : definition.getDefaultFilterTemplate();
 
-        // Base SELECT injected into CTE %s placeholder
-        String baseSelect =
-                "SELECT " +
-                buildSelectClause(columnPreset) +
-                " FROM " +
-                definition.getSchema() + "." +
-                definition.getTable();
+        FilterTemplate template =
+                definition.getFilterTemplates()
+                        .get(templateName);
 
-        return String.format(
-                template.getSqlFragment(), baseSelect);
-    }
-
-    private String buildStandardQuery(
-            TableDefinition definition,
-            FilterTemplate template,
-            ColumnPreset columnPreset,
-            Map<String, Object> parameters) {
-
-        StringBuilder sql = new StringBuilder();
-
-        sql.append("SELECT ")
-           .append(buildSelectClause(columnPreset))
-           .append(" FROM ")
-           .append(definition.getSchema())
-           .append(".")
-           .append(definition.getTable());
-
-        // Fixed template fragment first
-        boolean hasWhere = false;
-        if (template.getSqlFragment() != null
-                && !template.getSqlFragment().isBlank()) {
-            sql.append(" WHERE ")
-               .append(template.getSqlFragment());
-            hasWhere = true;
+        if (template == null) {
+            throw new InvalidTemplateException(
+                    templateName,
+                    request.getSchemaName(),
+                    request.getTableName());
         }
 
-        // Dynamic caller params appended with AND
-        for (String key : parameters.keySet()) {
-            // Skip internal params not meant for WHERE
-            if (key.equals("employeeId")) continue;
+        log.debug("[DataAccessFacade] Template resolved: {}",
+                templateName);
 
-            if (!hasWhere) {
-                sql.append(" WHERE ");
-                hasWhere = true;
-            } else {
-                sql.append(" AND ");
-            }
-            // Key from whitelist — safe as identifier
-            // Value bound as named param — injection safe
-            sql.append(key)
-               .append(" = :")
-               .append(key);
+        return template;
+    }
+
+    private ColumnPreset resolveColumnPreset(
+            DataRequest request,
+            TableDefinition definition) {
+
+        String presetName = request.getColumnPreset() != null
+                && !request.getColumnPreset().isBlank()
+                ? request.getColumnPreset()
+                : definition.getDefaultColumnPreset();
+
+        ColumnPreset preset =
+                definition.getColumnPresets()
+                        .get(presetName);
+
+        if (preset == null) {
+            throw new InvalidColumnPresetException(
+                    presetName,
+                    request.getSchemaName(),
+                    request.getTableName());
         }
 
-        return sql.toString();
+        log.debug("[DataAccessFacade] Column preset: {}",
+                presetName);
+
+        return preset;
     }
-
-    private String buildSelectClause(
-            ColumnPreset columnPreset) {
-        return columnPreset.getColumns()
-                .stream()
-                .sorted()
-                .collect(Collectors.joining(", "));
-    }
-
-    // ── Value object ───────────────────────────────────────────────
-
-    /**
-     * Holds the built SQL and bound parameters.
-     */
-    public record QueryComponents(
-            String sql,
-            Map<String, Object> parameters) {}
             }
