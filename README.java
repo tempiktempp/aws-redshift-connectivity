@@ -1,71 +1,67 @@
-private QueryResult fetchResults(String queryId,
-                                  QueryRequest request) {
-    List<Map<String, Object>> allRows = new ArrayList<>();
-    List<QueryResult.ColumnMetadata> columnMetadata = null;
-    String nextToken = null;
+WITH team_employees AS (
+    -- Step 1: find the team of the requesting employee
+    -- Step 2: get all employees in that same team
+    SELECT e.emp_id
+    FROM dto.entitlement e
+    WHERE e.team_id = (
+        SELECT team_id
+        FROM dto.entitlement
+        WHERE emp_id = 'EMP001'
+        LIMIT 1
+    )
+),
+entitled_interactions AS (
+    -- Step 3: get interactions where a team
+    -- employee was the interacting employee
+    SELECT
+        i.id              AS interaction_id,
+        i.employee_id,
+        i.interaction_date,
+        i.interaction_type,
+        i.created_at
+    FROM crm.interaction i
+    WHERE i.employee_id IN (
+        SELECT emp_id FROM team_employees
+    )
+)
+-- Step 4: join with child tables
+SELECT
+    ei.interaction_id,
+    ei.employee_id,
+    ei.interaction_date,
+    ei.interaction_type,
+    ei.created_at,
+    s.notes,
+    a.emp_id            AS attendee_emp_id,
+    a.attendee_name,
+    a.attendee_role
+FROM entitled_interactions ei
+LEFT JOIN crm.interaction_summary s
+    ON s.interaction_id = ei.interaction_id
+LEFT JOIN crm.interaction_attendee a
+    ON a.interaction_id = ei.interaction_id
+ORDER BY ei.interaction_date DESC,
+         ei.interaction_id
+LIMIT 100;
 
-    int maxResults = request.getMaxResults() > 0
-            ? Math.min(request.getMaxResults(),
-                       props.getQuery().getMaxResultsPerPage())
-            : props.getQuery().getMaxResultsPerPage();
 
-    log.debug("[Redshift-DataAPI] Fetching results, " +
-            "maxResults cap: {}", maxResults);
+Step 1 — Check entitlement table has data:
+SELECT * FROM dto.entitlement LIMIT 10;
 
-    do {
-        // Stop fetching pages if we already have enough rows
-        if (allRows.size() >= maxResults) {
-            log.debug("[Redshift-DataAPI] Row cap reached: {}",
-                    maxResults);
-            break;
-        }
+Step 2 — Check team lookup works:
+SELECT team_id
+FROM dto.entitlement
+WHERE emp_id = 'EMP001';
 
-        GetStatementResultRequest.Builder resultBuilder =
-                GetStatementResultRequest.builder()
-                        .id(queryId);
+Step 3 — Check team employees:
+SELECT emp_id
+FROM dto.entitlement
+WHERE team_id = 'YOUR_TEAM_ID';
 
-        if (nextToken != null) {
-            resultBuilder.nextToken(nextToken);
-        }
+Step 4 — Check interactions exist for those employees:
+SELECT *
+FROM crm.interaction
+WHERE employee_id IN ('EMP001', 'EMP002')
+LIMIT 10;
 
-        GetStatementResultResponse response =
-                redshiftDataClient.getStatementResult(
-                        resultBuilder.build());
-
-        // Extract column metadata on first page only
-        if (columnMetadata == null) {
-            columnMetadata = extractColumnMetadata(
-                    response.columnMetadata());
-        }
-
-        // Only add rows up to the maxResults cap
-        List<QueryResult.ColumnMetadata> finalMeta =
-                columnMetadata;
-
-        for (List<Field> row : response.records()) {
-            if (allRows.size() >= maxResults) {
-                // Hit the cap mid-page — stop adding rows
-                // and clear nextToken to stop pagination
-                nextToken = null;
-                break;
-            }
-            allRows.add(mapRow(row, finalMeta));
-        }
-
-        // Only update nextToken if we haven't hit the cap
-        if (nextToken != null || allRows.size() < maxResults) {
-            nextToken = response.nextToken();
-        }
-
-    } while (nextToken != null && !nextToken.isBlank());
-
-    return QueryResult.builder()
-            .rows(Collections.unmodifiableList(allRows))
-            .columnMetadata(columnMetadata != null
-                    ? columnMetadata
-                    : Collections.emptyList())
-            .totalRows(allRows.size())
-            .queryId(queryId)
-            .strategy(STRATEGY_NAME)
-            .build();
-}
+  
