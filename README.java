@@ -1,24 +1,20 @@
 package com.edp.api.definition;
 
 /**
- * Defines how a FilterTemplate executes its query.
+ * Declares where a template parameter value
+ * comes from at runtime.
  *
- * STANDARD → QueryBuilder builds SQL dynamically
- *            sqlFragment = optional WHERE clause
+ * FROM_EMPLOYEE_HEADER → value comes from
+ *   X-Employee-Id request header
  *
- * CTE      → sqlFragment is a full CTE that wraps
- *            the base SELECT via %s placeholder
+ * FROM_REQUEST_PARAM → value comes from
+ *   URL query params passed by caller
  *
- * VIEW     → sqlFragment is complete SQL executed as-is
- *            Column presets NOT applied
- *
- * PROC     → sqlFragment is a CALL statement
- *            followed by SELECT from temp table
- *            Column presets NOT applied
+ * HARDCODED → value is fixed in the template
+ *   definition — never from caller
  */
-public enum TemplateType {
-    STANDARD,
-    CTE,
-    VIEW,
-    PROC
+public enum ParamSource {
+    FROM_EMPLOYEE_HEADER,
+    FROM_REQUEST_PARAM,
+    HARDCODED
 }
