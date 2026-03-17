@@ -1,160 +1,211 @@
-package com.edp.api.facade;
+package com.edp.api.definition.tables;
 
 import com.edp.api.definition.ColumnPreset;
+import com.edp.api.definition.EntitlementFragments;
 import com.edp.api.definition.FilterTemplate;
 import com.edp.api.definition.TableDefinition;
+import com.edp.api.definition.TemplateParam;
 import com.edp.api.definition.TemplateType;
-import com.edp.api.exception.InvalidColumnPresetException;
-import com.edp.api.exception.InvalidTemplateException;
-import com.edp.api.model.request.DataRequest;
-import com.edp.api.model.response.DataResponse;
-import com.edp.api.query.QueryBuilder;
-import com.edp.api.query.TemplateExecutor;
-import com.edp.api.registry.TableRegistry;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Orchestrates the full data access flow.
+ * Table definition for crm.interaction.
  *
- * Flow:
- *   1. Look up TableDefinition  → 404 if unknown
- *   2. Resolve FilterTemplate   → 400 if unknown
- *   3. Resolve ColumnPreset     → 400 if unknown
- *                                 skipped for VIEW
- *   4. Build SQL via QueryBuilder
- *                                 skipped for VIEW
- *   5. Execute via TemplateExecutor
- *   6. Return DataResponse
+ * Filter templates:
+ *   default          → STANDARD, open access
+ *   my_team          → STANDARD, entitlement via
+ *                      security.v_team_entitlement
+ *   my_team_by_level → STANDARD, entitlement by level
+ *   my_team_cte      → CTE, inline entitlement logic
+ *   my_team_view     → VIEW, Redshift view
+ *
+ * Column presets:
+ *   default → core columns
+ *   summary → minimal columns
+ *   full    → all columns
  */
-@Slf4j
 @Component
-@RequiredArgsConstructor
-public class DataAccessFacade {
+public class InteractionTableDefinition
+        implements TableDefinition {
 
-    private final TableRegistry tableRegistry;
-    private final QueryBuilder queryBuilder;
-    private final TemplateExecutor templateExecutor;
+    private static final String ENTITLEMENT_CTE =
+            """
+            WITH team_employees AS (
+                SELECT emp_id
+                FROM dto.entitlement
+                WHERE team_id = (
+                    SELECT team_id
+                    FROM dto.entitlement
+                    WHERE emp_id = :employeeId
+                    LIMIT 1
+                )
+            ),
+            base_data AS (%s),
+            entitled_data AS (
+                SELECT bd.*
+                FROM base_data bd
+                WHERE bd.employee_id IN (
+                    SELECT emp_id FROM team_employees
+                )
+            ),
+            with_summary AS (
+                SELECT
+                    ed.*,
+                    s.notes
+                FROM entitled_data ed
+                LEFT JOIN crm.interaction_summary s
+                    ON s.interaction_id = ed.id
+            ),
+            with_attendees AS (
+                SELECT
+                    ws.*,
+                    a.emp_id        AS attendee_emp_id,
+                    a.attendee_name,
+                    a.attendee_role
+                FROM with_summary ws
+                LEFT JOIN crm.interaction_attendee a
+                    ON a.interaction_id = ws.id
+            )
+            SELECT * FROM with_attendees
+            ORDER BY interaction_date DESC, id
+            """;
 
-    public DataResponse fetchData(DataRequest request) {
+    @Override
+    public String getSchema() { return "crm"; }
 
-        log.info("[DataAccessFacade] Request: " +
-                "employee={}, schema={}, table={}, " +
-                "template={}, columns={}, maxResults={}",
-                request.getEmployeeId(),
-                request.getSchemaName(),
-                request.getTableName(),
-                request.getTemplateName(),
-                request.getColumnPreset(),
-                request.getMaxResults());
+    @Override
+    public String getTable() { return "interaction"; }
 
-        // Step 1 — resolve table definition
-        TableDefinition definition =
-                tableRegistry.getDefinition(
-                        request.getSchemaName(),
-                        request.getTableName());
-
-        // Step 2 — resolve filter template
-        FilterTemplate template =
-                resolveTemplate(request, definition);
-
-        log.info("[DataAccessFacade] TemplateType: {}",
-                template.getTemplateType());
-
-        List<Map<String, Object>> rows;
-
-        if (template.getTemplateType()
-                == TemplateType.VIEW) {
-
-            // VIEW — TemplateExecutor handles everything
-            // Column presets not applied
-            rows = templateExecutor.execute(
-                    request, template, null);
-
-        } else {
-
-            // STANDARD / CTE — resolve column preset
-            // and build SQL via QueryBuilder
-            ColumnPreset columnPreset =
-                    resolveColumnPreset(
-                            request, definition);
-
-            QueryBuilder.QueryComponents queryComponents =
-                    queryBuilder.build(
-                            definition,
-                            template,
-                            columnPreset,
-                            request);
-
-            rows = templateExecutor.execute(
-                    request, template, queryComponents);
-        }
-
-        log.info("[DataAccessFacade] Rows returned: {}",
-                rows.size());
-
-        return DataResponse.builder()
-                .schema(request.getSchemaName())
-                .table(request.getTableName())
-                .appliedTemplate(template.getName())
-                .appliedColumnPreset(
-                        request.getColumnPreset())
-                .totalRows(rows.size())
-                .rows(rows)
-                .build();
+    @Override
+    public String getDefaultFilterTemplate() {
+        return "default";
     }
 
-    // ── Private helpers ────────────────────────────────
-
-    private FilterTemplate resolveTemplate(
-            DataRequest request,
-            TableDefinition definition) {
-
-        String templateName =
-                request.getTemplateName() != null
-                && !request.getTemplateName().isBlank()
-                ? request.getTemplateName()
-                : definition.getDefaultFilterTemplate();
-
-        FilterTemplate template =
-                definition.getFilterTemplates()
-                        .get(templateName);
-
-        if (template == null) {
-            throw new InvalidTemplateException(
-                    templateName,
-                    request.getSchemaName(),
-                    request.getTableName());
-        }
-
-        return template;
+    @Override
+    public String getDefaultColumnPreset() {
+        return "default";
     }
 
-    private ColumnPreset resolveColumnPreset(
-            DataRequest request,
-            TableDefinition definition) {
+    @Override
+    public Map<String, ColumnPreset> getColumnPresets() {
+        Map<String, ColumnPreset> presets =
+                new HashMap<>();
 
-        String presetName =
-                request.getColumnPreset() != null
-                && !request.getColumnPreset().isBlank()
-                ? request.getColumnPreset()
-                : definition.getDefaultColumnPreset();
+        presets.put("default", ColumnPreset.builder()
+                .name("default")
+                .column("id")
+                .column("employee_id")
+                .column("interaction_date")
+                .column("interaction_type")
+                .column("createddate")
+                .build());
 
-        ColumnPreset preset =
-                definition.getColumnPresets()
-                        .get(presetName);
+        presets.put("summary", ColumnPreset.builder()
+                .name("summary")
+                .column("id")
+                .column("interaction_date")
+                .column("interaction_type")
+                .build());
 
-        if (preset == null) {
-            throw new InvalidColumnPresetException(
-                    presetName,
-                    request.getSchemaName(),
-                    request.getTableName());
-        }
+        presets.put("full", ColumnPreset.builder()
+                .name("full")
+                .column("id")
+                .column("employee_id")
+                .column("interaction_date")
+                .column("interaction_type")
+                .column("createddate")
+                .build());
 
-        return preset;
+        return Collections.unmodifiableMap(presets);
     }
-            }
+
+    @Override
+    public Map<String, FilterTemplate>
+            getFilterTemplates() {
+        Map<String, FilterTemplate> templates =
+                new HashMap<>();
+
+        // ── STANDARD — open access ─────────────────────
+        templates.put("default", FilterTemplate.builder()
+                .name("default")
+                .templateType(TemplateType.STANDARD)
+                .sqlFragment("")
+                .allowedParam("interaction_type")
+                .allowedParam("status")
+                .build());
+
+        // ── STANDARD — entitlement via security view ───
+        templates.put("my_team", FilterTemplate.builder()
+                .name("my_team")
+                .templateType(TemplateType.STANDARD)
+                .sqlFragment(
+                    EntitlementFragments
+                        .teamMemberFilter("employee_id"))
+                .templateParam(TemplateParam.builder()
+                    .paramName("employeeId")
+                    .fromEmployeeHeader(true)
+                    .build())
+                .allowedParam("interaction_type")
+                .allowedParam("status")
+                .build());
+
+        // ── STANDARD — entitlement by level ───────────
+        templates.put("my_team_by_level",
+                FilterTemplate.builder()
+                    .name("my_team_by_level")
+                    .templateType(TemplateType.STANDARD)
+                    .sqlFragment(
+                        EntitlementFragments
+                            .teamMemberFilterByLevel(
+                                "employee_id"))
+                    .templateParam(TemplateParam.builder()
+                        .paramName("employeeId")
+                        .fromEmployeeHeader(true)
+                        .build())
+                    .templateParam(TemplateParam.builder()
+                        .paramName("teamLevel")
+                        .fromEmployeeHeader(false)
+                        .build())
+                    .allowedParam("interaction_type")
+                    .allowedParam("status")
+                    .allowedParam("teamLevel")
+                    .build());
+
+        // ── CTE — inline entitlement logic ─────────────
+        templates.put("my_team_cte",
+                FilterTemplate.builder()
+                    .name("my_team_cte")
+                    .templateType(TemplateType.CTE)
+                    .sqlFragment(ENTITLEMENT_CTE)
+                    .templateParam(TemplateParam.builder()
+                        .paramName("employeeId")
+                        .fromEmployeeHeader(true)
+                        .build())
+                    .allowedParam("interaction_type")
+                    .allowedParam("status")
+                    .build());
+
+        // ── VIEW — Redshift view ───────────────────────
+        templates.put("my_team_view",
+                FilterTemplate.builder()
+                    .name("my_team_view")
+                    .templateType(TemplateType.VIEW)
+                    .sqlFragment(
+                        "SELECT * FROM " +
+                        "crm.v_interaction_entitled " +
+                        "WHERE employee_id = :employeeId")
+                    .templateParam(TemplateParam.builder()
+                        .paramName("employeeId")
+                        .fromEmployeeHeader(true)
+                        .build())
+                    .allowedParam("interaction_type")
+                    .allowedParam("status")
+                    .build());
+
+        return Collections.unmodifiableMap(templates);
+    }
+                      }
