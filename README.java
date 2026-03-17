@@ -1,185 +1,160 @@
-package com.edp.api.query;
+package com.edp.api.facade;
 
-import com.aws.utils.redshift.executor.RedshiftQueryExecutor;
-import com.aws.utils.redshift.model.QueryRequest;
+import com.edp.api.definition.ColumnPreset;
 import com.edp.api.definition.FilterTemplate;
-import com.edp.api.definition.TemplateParam;
-import com.edp.api.exception.InvalidFilterParamException;
+import com.edp.api.definition.TableDefinition;
+import com.edp.api.definition.TemplateType;
+import com.edp.api.exception.InvalidColumnPresetException;
+import com.edp.api.exception.InvalidTemplateException;
 import com.edp.api.model.request.DataRequest;
+import com.edp.api.model.response.DataResponse;
+import com.edp.api.query.QueryBuilder;
+import com.edp.api.query.TemplateExecutor;
+import com.edp.api.registry.TableRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Executes a query based on its TemplateType.
+ * Orchestrates the full data access flow.
  *
- * Routes to correct execution path:
- *   STANDARD / CTE → uses QueryComponents from QueryBuilder
- *   VIEW           → executes sqlFragment as-is
+ * Flow:
+ *   1. Look up TableDefinition  → 404 if unknown
+ *   2. Resolve FilterTemplate   → 400 if unknown
+ *   3. Resolve ColumnPreset     → 400 if unknown
+ *                                 skipped for VIEW
+ *   4. Build SQL via QueryBuilder
+ *                                 skipped for VIEW
+ *   5. Execute via TemplateExecutor
+ *   6. Return DataResponse
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class TemplateExecutor {
+public class DataAccessFacade {
 
-    private final RedshiftQueryExecutor queryExecutor;
+    private final TableRegistry tableRegistry;
+    private final QueryBuilder queryBuilder;
+    private final TemplateExecutor templateExecutor;
 
-    public List<Map<String, Object>> execute(
-            DataRequest request,
-            FilterTemplate template,
-            QueryBuilder.QueryComponents queryComponents) {
+    public DataResponse fetchData(DataRequest request) {
 
-        return switch (template.getTemplateType()) {
-            case STANDARD, CTE ->
-                    executeStandardOrCte(
-                            request, template,
-                            queryComponents);
-            case VIEW ->
-                    executeView(request, template);
-        };
-    }
+        log.info("[DataAccessFacade] Request: " +
+                "employee={}, schema={}, table={}, " +
+                "template={}, columns={}, maxResults={}",
+                request.getEmployeeId(),
+                request.getSchemaName(),
+                request.getTableName(),
+                request.getTemplateName(),
+                request.getColumnPreset(),
+                request.getMaxResults());
 
-    // ── STANDARD / CTE ────────────────────────────────
+        // Step 1 — resolve table definition
+        TableDefinition definition =
+                tableRegistry.getDefinition(
+                        request.getSchemaName(),
+                        request.getTableName());
 
-    private List<Map<String, Object>> executeStandardOrCte(
-            DataRequest request,
-            FilterTemplate template,
-            QueryBuilder.QueryComponents queryComponents) {
+        // Step 2 — resolve filter template
+        FilterTemplate template =
+                resolveTemplate(request, definition);
 
-        log.debug("[TemplateExecutor] Executing {}: {}",
-                template.getTemplateType(),
-                template.getName());
+        log.info("[DataAccessFacade] TemplateType: {}",
+                template.getTemplateType());
 
-        QueryRequest.QueryRequestBuilder builder =
-                QueryRequest.builder()
-                        .sql(queryComponents.sql())
-                        .maxResults(request.getMaxResults())
-                        .queryLabel(buildLabel(
-                                request, template));
+        List<Map<String, Object>> rows;
 
-        queryComponents.parameters()
-                .forEach(builder::parameter);
+        if (template.getTemplateType()
+                == TemplateType.VIEW) {
 
-        return queryExecutor.queryForList(builder.build());
-    }
+            // VIEW — TemplateExecutor handles everything
+            // Column presets not applied
+            rows = templateExecutor.execute(
+                    request, template, null);
 
-    // ── VIEW ──────────────────────────────────────────
+        } else {
 
-    private List<Map<String, Object>> executeView(
-            DataRequest request,
-            FilterTemplate template) {
+            // STANDARD / CTE — resolve column preset
+            // and build SQL via QueryBuilder
+            ColumnPreset columnPreset =
+                    resolveColumnPreset(
+                            request, definition);
 
-        log.debug("[TemplateExecutor] Executing VIEW: {}",
-                template.getName());
+            QueryBuilder.QueryComponents queryComponents =
+                    queryBuilder.build(
+                            definition,
+                            template,
+                            columnPreset,
+                            request);
 
-        Map<String, Object> params =
-                resolveTemplateParams(request, template);
-
-        StringBuilder sql = new StringBuilder(
-                template.getSqlFragment());
-
-        appendDynamicParams(
-                sql, params, request, template);
-
-        QueryRequest.QueryRequestBuilder builder =
-                QueryRequest.builder()
-                        .sql(sql.toString())
-                        .maxResults(request.getMaxResults())
-                        .queryLabel(buildLabel(
-                                request, template));
-
-        params.forEach(builder::parameter);
-
-        return queryExecutor.queryForList(builder.build());
-    }
-
-    // ── Param resolution ──────────────────────────────
-
-    private Map<String, Object> resolveTemplateParams(
-            DataRequest request,
-            FilterTemplate template) {
-
-        Map<String, Object> params =
-                new LinkedHashMap<>();
-
-        if (template.getDefaultParams() != null) {
-            params.putAll(template.getDefaultParams());
+            rows = templateExecutor.execute(
+                    request, template, queryComponents);
         }
 
-        if (template.getTemplateParams() != null) {
-            for (TemplateParam tp :
-                    template.getTemplateParams()) {
+        log.info("[DataAccessFacade] Rows returned: {}",
+                rows.size());
 
-                Object value;
+        return DataResponse.builder()
+                .schema(request.getSchemaName())
+                .table(request.getTableName())
+                .appliedTemplate(template.getName())
+                .appliedColumnPreset(
+                        request.getColumnPreset())
+                .totalRows(rows.size())
+                .rows(rows)
+                .build();
+    }
 
-                if (tp.getHardcodedValue() != null) {
-                    value = tp.getHardcodedValue();
+    // ── Private helpers ────────────────────────────────
 
-                } else if (tp.isFromEmployeeHeader()) {
-                    // employeeId from X-Employee-Id header
-                    value = request.getEmployeeId();
+    private FilterTemplate resolveTemplate(
+            DataRequest request,
+            TableDefinition definition) {
 
-                } else {
-                    // From URL query params
-                    value = request.getFilterParams()
-                            != null
-                            ? request.getFilterParams()
-                                     .get(tp.getParamName())
-                            : null;
-                }
+        String templateName =
+                request.getTemplateName() != null
+                && !request.getTemplateName().isBlank()
+                ? request.getTemplateName()
+                : definition.getDefaultFilterTemplate();
 
-                if (value != null) {
-                    params.put(
-                            tp.getParamName(), value);
-                }
+        FilterTemplate template =
+                definition.getFilterTemplates()
+                        .get(templateName);
 
-                log.debug("[TemplateExecutor] Param " +
-                        "'{}' resolved",
-                        tp.getParamName());
+        if (template == null) {
+            throw new InvalidTemplateException(
+                    templateName,
+                    request.getSchemaName(),
+                    request.getTableName());
+        }
+
+        return template;
+    }
+
+    private ColumnPreset resolveColumnPreset(
+            DataRequest request,
+            TableDefinition definition) {
+
+        String presetName =
+                request.getColumnPreset() != null
+                && !request.getColumnPreset().isBlank()
+                ? request.getColumnPreset()
+                : definition.getDefaultColumnPreset();
+
+        ColumnPreset preset =
+                definition.getColumnPresets()
+                        .get(presetName);
+
+        if (preset == null) {
+            throw new InvalidColumnPresetException(
+                    presetName,
+                    request.getSchemaName(),
+                    request.getTableName());
+        }
+
+        return preset;
+    }
             }
-        }
-
-        return params;
-    }
-
-    private void appendDynamicParams(
-            StringBuilder sql,
-            Map<String, Object> params,
-            DataRequest request,
-            FilterTemplate template) {
-
-        if (request.getFilterParams() == null
-                || request.getFilterParams().isEmpty()) {
-            return;
-        }
-
-        request.getFilterParams().forEach((key, value) -> {
-            if (params.containsKey(key)) return;
-
-            if (!template.getAllowedParams()
-                    .contains(key)) {
-                throw new InvalidFilterParamException(
-                        key, template.getName());
-            }
-
-            sql.append(" AND ")
-               .append(key)
-               .append(" = :")
-               .append(key);
-
-            params.put(key, value);
-        });
-    }
-
-    private String buildLabel(
-            DataRequest request,
-            FilterTemplate template) {
-        return request.getSchemaName() + "-" +
-               request.getTableName() + "-" +
-               template.getName();
-    }
-}
