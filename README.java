@@ -1,20 +1,47 @@
 package com.edp.api.definition;
 
+import lombok.Builder;
+import lombok.Getter;
+
 /**
- * Declares where a template parameter value
- * comes from at runtime.
+ * Declares a single parameter needed by a
+ * VIEW template.
  *
- * FROM_EMPLOYEE_HEADER → value comes from
- *   X-Employee-Id request header
+ * employeeId always comes from X-Employee-Id header.
+ * All other params come from URL query params.
  *
- * FROM_REQUEST_PARAM → value comes from
- *   URL query params passed by caller
+ * Example:
+ *   TemplateParam.builder()
+ *       .paramName("employeeId")
+ *       .fromEmployeeHeader(true)
+ *       .build()
  *
- * HARDCODED → value is fixed in the template
- *   definition — never from caller
+ *   TemplateParam.builder()
+ *       .paramName("teamLevel")
+ *       .fromEmployeeHeader(false)
+ *       .build()
  */
-public enum ParamSource {
-    FROM_EMPLOYEE_HEADER,
-    FROM_REQUEST_PARAM,
-    HARDCODED
+@Getter
+@Builder
+public class TemplateParam {
+
+    /**
+     * Named parameter as it appears in SQL.
+     * e.g. "employeeId" for :employeeId in SQL
+     */
+    private final String paramName;
+
+    /**
+     * When true — value comes from X-Employee-Id header.
+     * When false — value comes from URL query params.
+     */
+    @Builder.Default
+    private final boolean fromEmployeeHeader = false;
+
+    /**
+     * Fixed hardcoded value.
+     * When set — always uses this value regardless
+     * of fromEmployeeHeader flag.
+     */
+    private final Object hardcodedValue;
 }
