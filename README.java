@@ -2,46 +2,70 @@ package com.edp.api.definition;
 
 import lombok.Builder;
 import lombok.Getter;
+import lombok.Singular;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
- * Declares a single parameter needed by a
- * VIEW template.
+ * Defines a named filter template for a table.
  *
- * employeeId always comes from X-Employee-Id header.
- * All other params come from URL query params.
+ * templateType controls execution path:
  *
- * Example:
- *   TemplateParam.builder()
- *       .paramName("employeeId")
- *       .fromEmployeeHeader(true)
- *       .build()
+ *   STANDARD → QueryBuilder builds SQL dynamically
+ *              sqlFragment = optional WHERE clause
  *
- *   TemplateParam.builder()
- *       .paramName("teamLevel")
- *       .fromEmployeeHeader(false)
- *       .build()
+ *   CTE      → sqlFragment wraps base SELECT via %s
+ *
+ *   VIEW     → sqlFragment = full SQL executed as-is
+ *              templateParams declare what to bind
+ *              column presets NOT applied
  */
 @Getter
 @Builder
-public class TemplateParam {
+public class FilterTemplate {
+
+    /** Unique name within the table definition */
+    private final String name;
 
     /**
-     * Named parameter as it appears in SQL.
-     * e.g. "employeeId" for :employeeId in SQL
-     */
-    private final String paramName;
-
-    /**
-     * When true — value comes from X-Employee-Id header.
-     * When false — value comes from URL query params.
+     * How this template executes.
+     * Defaults to STANDARD if not set.
      */
     @Builder.Default
-    private final boolean fromEmployeeHeader = false;
+    private final TemplateType templateType =
+            TemplateType.STANDARD;
 
     /**
-     * Fixed hardcoded value.
-     * When set — always uses this value regardless
-     * of fromEmployeeHeader flag.
+     * SQL content — meaning depends on templateType:
+     *   STANDARD → optional WHERE fragment
+     *   CTE      → full CTE wrapping base SELECT via %s
+     *   VIEW     → complete SQL executed as-is
      */
-    private final Object hardcodedValue;
+    @Builder.Default
+    private final String sqlFragment = "";
+
+    /**
+     * Parameter declarations for VIEW templates.
+     * Also used for STANDARD when params come
+     * from header rather than URL params.
+     */
+    @Singular("templateParam")
+    private final List<TemplateParam> templateParams;
+
+    /**
+     * URL param names caller can pass dynamically.
+     * Applied on top of template with AND.
+     * Unknown params → 400 Bad Request.
+     */
+    @Singular("allowedParam")
+    private final Set<String> allowedParams;
+
+    /**
+     * Default values for named parameters.
+     * Applied when caller does not supply them.
+     */
+    @Singular("defaultParam")
+    private final Map<String, Object> defaultParams;
 }
