@@ -1,71 +1,67 @@
 package com.edp.api.definition;
 
-import lombok.Builder;
-import lombok.Getter;
-import lombok.Singular;
-
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
 /**
- * Defines a named filter template for a table.
+ * Shared SQL fragments for entitlement-based filtering.
  *
- * templateType controls execution path:
+ * Reusable across any TableDefinition that needs
+ * team-based access control.
  *
- *   STANDARD → QueryBuilder builds SQL dynamically
- *              sqlFragment = optional WHERE clause
- *
- *   CTE      → sqlFragment wraps base SELECT via %s
- *
- *   VIEW     → sqlFragment = full SQL executed as-is
- *              templateParams declare what to bind
- *              column presets NOT applied
+ * All fragments reference security.v_team_entitlement
+ * which is owned by the security team in AWS —
+ * independently of any Java release.
  */
-@Getter
-@Builder
-public class FilterTemplate {
+public final class EntitlementFragments {
 
-    /** Unique name within the table definition */
-    private final String name;
+    private static final String ENTITLEMENT_VIEW =
+            "security.v_team_entitlement";
 
-    /**
-     * How this template executes.
-     * Defaults to STANDARD if not set.
-     */
-    @Builder.Default
-    private final TemplateType templateType =
-            TemplateType.STANDARD;
+    private EntitlementFragments() {}
 
     /**
-     * SQL content — meaning depends on templateType:
-     *   STANDARD → optional WHERE fragment
-     *   CTE      → full CTE wrapping base SELECT via %s
-     *   VIEW     → complete SQL executed as-is
+     * Generates WHERE fragment filtering rows where
+     * tableColumn is in the caller's entitled team.
+     *
+     * Generated SQL:
+     *   {tableColumn} IN (
+     *       SELECT team_member_id
+     *       FROM security.v_team_entitlement
+     *       WHERE source_employee_id = :employeeId
+     *   )
+     *
+     * @param tableColumn column in target table to filter
+     * @return SQL WHERE fragment
      */
-    @Builder.Default
-    private final String sqlFragment = "";
+    public static String teamMemberFilter(
+            String tableColumn) {
+        return tableColumn + " IN (" +
+               "SELECT team_member_id " +
+               "FROM " + ENTITLEMENT_VIEW + " " +
+               "WHERE source_employee_id = :employeeId" +
+               ")";
+    }
 
     /**
-     * Parameter declarations for VIEW templates.
-     * Also used for STANDARD when params come
-     * from header rather than URL params.
+     * Same as teamMemberFilter but also filters
+     * by team_level.
+     *
+     * Generated SQL:
+     *   {tableColumn} IN (
+     *       SELECT team_member_id
+     *       FROM security.v_team_entitlement
+     *       WHERE source_employee_id = :employeeId
+     *       AND   team_level = :teamLevel
+     *   )
+     *
+     * @param tableColumn column in target table to filter
+     * @return SQL WHERE fragment
      */
-    @Singular("templateParam")
-    private final List<TemplateParam> templateParams;
-
-    /**
-     * URL param names caller can pass dynamically.
-     * Applied on top of template with AND.
-     * Unknown params → 400 Bad Request.
-     */
-    @Singular("allowedParam")
-    private final Set<String> allowedParams;
-
-    /**
-     * Default values for named parameters.
-     * Applied when caller does not supply them.
-     */
-    @Singular("defaultParam")
-    private final Map<String, Object> defaultParams;
+    public static String teamMemberFilterByLevel(
+            String tableColumn) {
+        return tableColumn + " IN (" +
+               "SELECT team_member_id " +
+               "FROM " + ENTITLEMENT_VIEW + " " +
+               "WHERE source_employee_id = :employeeId " +
+               "AND   team_level = :teamLevel" +
+               ")";
+    }
 }
