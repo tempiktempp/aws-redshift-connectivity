@@ -1,11 +1,19 @@
-CREATE OR REPLACE VIEW security.v_interaction_entitled AS
-SELECT
-    i.id                AS interaction_id,
-    i.employee_id,
-    i.interaction_date,
-    i.interaction_type,
-    i.createddate,
-    ent.source_employee_id
-FROM crm.interaction i
-INNER JOIN security.v_team_entitlement ent
-    ON ent.team_member_id = i.employee_id;
+// ── VIEW — security view ───────────────────────────
+templates.put("my_team_view",
+        FilterTemplate.builder()
+            .name("my_team_view")
+            .templateType(TemplateType.VIEW)
+            // View is in security schema
+            // Java passes source_employee_id
+            // as WHERE clause on top
+            .sqlFragment(
+                "SELECT * FROM " +
+                "security.v_interaction_entitled " +
+                "WHERE source_employee_id = :employeeId")
+            .templateParam(TemplateParam.builder()
+                .paramName("employeeId")
+                .fromEmployeeHeader(true)
+                .build())
+            .allowedParam("interaction_type")
+            .allowedParam("status")
+            .build());
