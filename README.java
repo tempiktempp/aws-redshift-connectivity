@@ -15,22 +15,38 @@ import java.util.Map;
 /**
  * Table definition for crm.interaction.
  *
+ * To switch default filter template:
+ *   Change DEFAULT_FILTER_TEMPLATE to any template name
+ *
+ * To switch default column preset:
+ *   Change DEFAULT_COLUMN_PRESET to any preset name
+ *
  * Filter templates:
  *   default          → STANDARD, open access
  *   my_team          → STANDARD, entitlement via
  *                      security.v_team_entitlement
  *   my_team_by_level → STANDARD, entitlement by level
  *   my_team_cte      → CTE, inline entitlement logic
- *   my_team_view     → VIEW, Redshift view
+ *   my_team_view     → VIEW, Redshift view (DEFAULT)
  *
  * Column presets:
- *   default → core columns
+ *   default → core columns (DEFAULT)
  *   summary → minimal columns
- *   full    → all columns
+ *   full    → SELECT * all columns
  */
 @Component
 public class InteractionTableDefinition
         implements TableDefinition {
+
+    // ── Switch defaults here ───────────────────────────
+    // Change these constants to switch default strategy
+    // without touching any other code
+    private static final String DEFAULT_FILTER_TEMPLATE =
+            "my_team_view";
+
+    private static final String DEFAULT_COLUMN_PRESET =
+            "default";
+    // ──────────────────────────────────────────────────
 
     private static final String ENTITLEMENT_CTE =
             """
@@ -82,12 +98,12 @@ public class InteractionTableDefinition
 
     @Override
     public String getDefaultFilterTemplate() {
-        return "default";
+        return DEFAULT_FILTER_TEMPLATE;
     }
 
     @Override
     public String getDefaultColumnPreset() {
-        return "default";
+        return DEFAULT_COLUMN_PRESET;
     }
 
     @Override
@@ -111,13 +127,11 @@ public class InteractionTableDefinition
                 .column("interaction_type")
                 .build());
 
+        // full preset uses wildcard — QueryBuilder
+        // generates SELECT * instead of column list
         presets.put("full", ColumnPreset.builder()
                 .name("full")
-                .column("id")
-                .column("employee_id")
-                .column("interaction_date")
-                .column("interaction_type")
-                .column("createddate")
+                .column("*")
                 .build());
 
         return Collections.unmodifiableMap(presets);
@@ -130,8 +144,8 @@ public class InteractionTableDefinition
                 new HashMap<>();
 
         // ── STANDARD — open access ─────────────────────
-        templates.put("default", FilterTemplate.builder()
-                .name("default")
+        templates.put("open", FilterTemplate.builder()
+                .name("open")
                 .templateType(TemplateType.STANDARD)
                 .sqlFragment("")
                 .allowedParam("interaction_type")
@@ -189,7 +203,7 @@ public class InteractionTableDefinition
                     .allowedParam("status")
                     .build());
 
-        // ── VIEW — Redshift view ───────────────────────
+        // ── VIEW — Redshift view (DEFAULT) ─────────────
         templates.put("my_team_view",
                 FilterTemplate.builder()
                     .name("my_team_view")
@@ -208,4 +222,4 @@ public class InteractionTableDefinition
 
         return Collections.unmodifiableMap(templates);
     }
-                      }
+        }
