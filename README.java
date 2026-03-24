@@ -1,85 +1,127 @@
-package com.edp.api.service;
+package com.edp.api.controller;
 
-import com.aws.utils.redshift.executor.RedshiftQueryExecutor;
-import com.aws.utils.redshift.model.QueryRequest;
 import com.edp.api.model.request.InteractionFilterRequest;
 import com.edp.api.model.response.InteractionResponse;
-import com.edp.api.query.InteractionQueryBuilder;
+import com.edp.api.service.InteractionService;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
-
-import java.util.List;
-import java.util.Map;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Service for interaction data queries.
+ * Controller for interaction search API.
  *
- * Orchestrates:
- *   1. Build SQL via InteractionQueryBuilder
- *   2. Execute via RedshiftQueryExecutor
- *   3. Return InteractionResponse
+ * POST /api/v1/interactions/search
+ *
+ * Accepts JSON body with filter params.
+ * employeeId comes from X-Employee-Id header.
+ *
+ * Example request:
+ * {
+ *   "viewType":  "My team",
+ *   "typeDesc":  "Phone Call",
+ *   "clientId":  "ACC001",
+ *   "dateFrom":  "2024-01-01 00:00:00",
+ *   "dateTo":    "2024-12-31 23:59:59"
+ * }
  */
 @Slf4j
-@Service
+@Validated
+@RestController
 @RequiredArgsConstructor
-public class InteractionService {
+@RequestMapping("/api/v1/interactions")
+public class InteractionController {
 
-    private final RedshiftQueryExecutor queryExecutor;
-    private final InteractionQueryBuilder queryBuilder;
+    private final InteractionService interactionService;
 
     /**
-     * Fetches interactions based on filter request
-     * and employee entitlement.
+     * Search interactions with filters.
      *
-     * @param request    filter params from JSON body
-     * @param employeeId from X-Employee-Id header
-     * @param maxResults max rows to return
-     * @return InteractionResponse with rows
+     * POST /api/v1/interactions/search
+     *
+     * @param employeeId  from X-Employee-Id header
+     * @param request     JSON body with filter params
+     * @param maxResults  optional max rows, default 100
      */
-    public InteractionResponse fetchInteractions(
-            InteractionFilterRequest request,
-            String employeeId,
-            int maxResults) {
+    @PostMapping("/search")
+    public ResponseEntity<InteractionResponse>
+            searchInteractions(
+                @RequestHeader("X-Employee-Id")
+                @NotBlank(message =
+                        "X-Employee-Id header is required")
+                String employeeId,
 
-        log.info("[InteractionService] Fetching. " +
-                "employee={}, viewType={}, " +
-                "clientId={}, maxResults={}",
-                employeeId,
-                request.getViewType(),
-                request.getClientId(),
-                maxResults);
+                @RequestBody
+                @Valid
+                InteractionFilterRequest request,
 
-        // Build SQL and params
-        InteractionQueryBuilder.QueryComponents
-                queryComponents = queryBuilder.build(
+                @RequestParam(defaultValue = "100")
+                @Min(value = 1,
+                     message = "maxResults must be " +
+                               "at least 1")
+                @Max(value = 1000,
+                     message = "maxResults cannot " +
+                               "exceed 1000")
+                int maxResults) {
+
+        log.info("[InteractionController] Search. " +
+                "employee={}, viewType={}",
+                employeeId, request.getViewType());
+
+        InteractionResponse response =
+                interactionService.fetchInteractions(
                         request, employeeId, maxResults);
 
-        // Execute query
-        QueryRequest.QueryRequestBuilder builder =
-                QueryRequest.builder()
-                        .sql(queryComponents.sql())
-                        .maxResults(maxResults)
-                        .queryLabel(
-                                "interaction-" +
-                                request.getViewType()
-                                       .toLowerCase()
-                                       .replace(" ", "-"));
-
-        queryComponents.parameters()
-                .forEach(builder::parameter);
-
-        List<Map<String, Object>> rows =
-                queryExecutor.queryForList(
-                        builder.build());
-
-        log.info("[InteractionService] Rows returned: {}",
-                rows.size());
-
-        return InteractionResponse.builder()
-                .viewType(request.getViewType())
-                .totalRows(rows.size())
-                .rows(rows)
-                .build();
+        return ResponseEntity.ok(response);
     }
 }
+```
+
+---
+
+### Test endpoints
+```
+POST http://localhost:8080/api/v1/interactions/search
+X-Employee-Id: EMP001
+Content-Type: application/json
+
+// My team — all filters
+{
+  "viewType": "My team",
+  "typeDesc": "Phone Call",
+  "clientId": "ACC001",
+  "dateFrom": "2024-01-01 00:00:00",
+  "dateTo":   "2024-12-31 23:59:59"
+}
+
+// My interaction — no optional filters
+{
+  "viewType": "My interaction"
+}
+
+// My team — date range only
+{
+  "viewType": "My team",
+  "dateFrom": "2024-01-01 00:00:00",
+  "dateTo":   "2024-12-31 23:59:59"
+}
+
+// Missing viewType → 400 Bad Request
+{
+  "typeDesc": "Phone Call"
+}
+
+// Invalid viewType → 400 Bad Request
+{
+  "viewType": "Invalid"
+    }
