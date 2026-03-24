@@ -1,54 +1,24 @@
-package com.edp.api.model.request;
+package com.edp.api.model.response;
 
-import jakarta.validation.constraints.NotBlank;
+import lombok.Builder;
 import lombok.Getter;
-import lombok.Setter;
+
+import java.util.List;
+import java.util.Map;
 
 /**
- * JSON request body for interaction search.
- *
- * viewType is mandatory — determines entitlement logic.
- * All other filters are optional.
- *
- * viewType values:
- *   "My team"        → filter by team entitlement
- *   "My interaction" → filter by employee only
+ * Response wrapper for interaction search results.
  */
 @Getter
-@Setter
-public class InteractionFilterRequest {
+@Builder
+public class InteractionResponse {
 
-    /**
-     * Determines entitlement scope.
-     * Required — must be "My team" or "My interaction"
-     */
-    @NotBlank(message = "viewType is required")
-    private String viewType;
+    /** View type applied e.g. "My team" */
+    private final String viewType;
 
-    /**
-     * Filter by interaction type.
-     * Maps to: interactiontype column
-     * e.g. "Phone Call", "Email"
-     */
-    private String typeDesc;
+    /** Total rows returned */
+    private final int totalRows;
 
-    /**
-     * Filter by account/client ID.
-     * Maps to: accountid column
-     */
-    private String clientId;
-
-    /**
-     * Start of date range filter.
-     * Maps to: starttime >= dateFrom
-     * Format: yyyy-MM-dd HH:mm:ss
-     */
-    private String dateFrom;
-
-    /**
-     * End of date range filter.
-     * Maps to: endtime <= dateTo
-     * Format: yyyy-MM-dd HH:mm:ss
-     */
-    private String dateTo;
+    /** Interaction rows */
+    private final List<Map<String, Object>> rows;
 }
